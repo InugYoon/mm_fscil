@@ -10,6 +10,7 @@ from models.resnet18_encoder_cifar import CIFAR_ResNet18, CIFAR_ResNet18_1, CIFA
 from models.supcon_resnet_cifar import supcon_resnet18
 from vissl.utils.checkpoint import replace_module_prefix
 from utils_s import *
+from tqdm import tqdm
 
 
 from clip.clip import load
@@ -24,7 +25,7 @@ from src.modeling import ClassificationHead, ImageEncoder
 
 class MYNET(nn.Module):
 
-    def __init__(self, args, fw_mode=None, SL=None, arch=None):
+    def __init__(self, args, fw_mode=None, textual_clf_weights=None):
         super().__init__()
 
         #self.new_mode = args.new_mode
@@ -43,26 +44,36 @@ class MYNET(nn.Module):
             self.encmlp_dim = args.encmlp_dim
             self.encmlp_layers = args.encmlp_layers
 
-        self.clip_encoder = CLIP_Model(args, keep_lang=False)
+        self.clip_img_encoder = CLIP_Model(args, keep_lang=False)
         #textual_classifier = get_classification_head(args, args.train_dataset)
-        if self.image_encoder is not None:
-            self.train_preprocess = self.clip_encoder.train_preprocess
-            self.val_preprocess = self.clip_encoder.val_preprocess
+        if self.clip_img_encoder is not None:
+            self.train_preprocess = self.clip_img_encoder.train_preprocess
+            self.val_preprocess = self.clip_img_encoder.val_preprocess
+        self.textual_clf_weights = textual_clf_weights
 
-        if args.model_type == 'ViT-L/32':
+        if args.model_type == 'ViT-L_14':
             self.num_features = 768
         else:
             raise NotImplementedError
 
+        #self.textual_classifier = nn.Linear(self.num_features, args.num_classes, bias=False)
+
+
+        self.textual_clf_weights = self.textual_clf_weights[args.task_class_order]
+        textual_clf_head = ClassificationHead(normalize=True, weights=self.textual_clf_weights)
+        self.textual_classifier = textual_clf_head
+
+
+
+
+
+        """
         if not args.use_encmlp:
             self.fc = nn.Linear(self.num_features, args.num_classes, bias=False)
         else:
             self.fc = nn.Linear(self.encmlp_dim, args.num_classes, bias=False)
+        """
 
-        ################################################################
-        # To be removed
-        self.textual_classifier = self.fc
-        ################################################################
 
 
         if args.use_head:
@@ -86,7 +97,7 @@ class MYNET(nn.Module):
 
         #with torch.no_grad(): ### edit on 221009 for cosface debug mini
         #    self.fc.weight *= 2.321
-        nn.init.xavier_uniform_(self.fc.weight)
+        #nn.init.xavier_uniform_(self.fc.weight)
 
         if args.fw_mode == 'arcface':
             self.cos_m = math.cos(self.m)
@@ -102,8 +113,8 @@ class MYNET(nn.Module):
 
 
 
-    def __call__(self, inputs):
-        return self.forward(inputs)
+    #def __call__(self, inputs):
+    #    return self.forward(inputs)
 
     def save(self, filename):
         print(f'Saving image classifier to {filename}')
@@ -129,9 +140,11 @@ class MYNET(nn.Module):
         x = F.normalize(self.head(x), dim=1)
         return x
 
-    def forward(self, inputs):
-        features = self.clip_encoder(inputs)
+    def forward(self, inputs, sess=None):
+        features = self.clip_img_encoder(inputs)
         outputs = self.textual_classifier(features)
+        n_cls = self.base_class if sess == 0 else self.base_class + self.way * (sess)
+        outputs = outputs[:, :n_cls]
         return outputs
     """
     def forward(self, input, label=None, sess=None, doenc=True):
@@ -289,22 +302,20 @@ class ImageClassifier(torch.nn.Module):
         return torch_load(filename)
 
 
-def build_classification_head(model, dataset_name, template, data_location, device):
+def build_zeroshot_weights(model, args, template, device):
+    dataset_name = args.dataset
     template = get_templates(dataset_name)
 
     logit_scale = model.logit_scale
-    dataset = get_dataset(
-        dataset_name,
-        None,
-        location=data_location
-    )
     model.eval()
     model.to(device)
 
     print('Building classification head.')
     with torch.no_grad():
         zeroshot_weights = []
-        for classname in tqdm(dataset.classnames):
+        for i in range(args.num_classes):
+        #for classname in tqdm(dataset.classnames):
+            classname = args.dataset_label2txt[i]
             texts = []
             for t in template:
                 texts.append(t(classname))
@@ -324,24 +335,48 @@ def build_classification_head(model, dataset_name, template, data_location, devi
 
         zeroshot_weights = zeroshot_weights.squeeze().float()
         zeroshot_weights = torch.transpose(zeroshot_weights, 0, 1)
-
-    classification_head = ClassificationHead(normalize=True, weights=zeroshot_weights)
-
-    return classification_head
+    return zeroshot_weights
 
 
-def get_classification_head(args, dataset):
-    filename = os.path.join(args.save, f'head_{dataset}.pt')
-    if os.path.exists(filename):
-        print(f'Classification head for {args.model} on {dataset} exists at {filename}')
-        return ClassificationHead.load(filename)
-    print(f'Did not find classification head for {args.model} on {dataset} at {filename}, building one from scratch.')
-    model = ImageEncoder(args, keep_lang=True).model
-    template = get_templates(dataset)
-    classification_head = build_classification_head(model, dataset, template, args.data_location, args.device)
-    os.makedirs(args.save, exist_ok=True)
-    classification_head.save(filename)
-    return classification_head
+
+def get_zeroshot_weights(args):
+
+    print(f'Did not find classification head for {args.model_type} on {args.dataset} at {args.text_clf_weight_fn}, building one from scratch.')
+
+    model = CLIP_Model(args, keep_lang=True).model
+    template = get_templates(args.dataset)
+    zeroshot_weights = build_zeroshot_weights(model, args, template, args.device)
+    return zeroshot_weights
+
+
+class ClassificationHead(torch.nn.Linear):
+    def __init__(self, normalize, weights, biases=None):
+        output_size, input_size = weights.shape
+        super().__init__(input_size, output_size)
+        self.normalize = normalize
+        if weights is not None:
+            self.weight = torch.nn.Parameter(weights.clone())
+        if biases is not None:
+            self.bias = torch.nn.Parameter(biases.clone())
+        else:
+            self.bias = torch.nn.Parameter(torch.zeros_like(self.bias))
+
+    def forward(self, inputs):
+        if self.normalize:
+            inputs = inputs / inputs.norm(dim=-1, keepdim=True)
+        return super().forward(inputs)
+
+    def __call__(self, inputs):
+        return self.forward(inputs)
+
+    def save(self, filename):
+        print(f'Saving classification head to {filename}')
+        torch_save(self, filename)
+
+    @classmethod
+    def load(cls, filename):
+        print(f'Loading classification head from {filename}')
+        return torch_load(filename)
 
 
 class projection_MLP(nn.Module):

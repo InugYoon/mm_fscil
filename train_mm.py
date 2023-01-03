@@ -7,21 +7,24 @@ def get_command_line_parser():
     parser = argparse.ArgumentParser()
 
     # about dataset and network
-    parser.add_argument('-project', type=str, default='bb')
-    parser.add_argument('-dataset', type=str, default='cifar100',
+    parser.add_argument('-project', type=str, default='mm')
+    parser.add_argument('-dataset', type=str, default='cub200',
                         choices=['mini_imagenet', 'cub200', 'cifar100'])
-    parser.add_argument('-dataroot', type=str, default='../ilfr/data/')
+    #parser.add_argument('-dataroot', type=str, default='../ilfr/data/')
+    parser.add_argument('-dataroot', type=str, default='../ILFR/data/')
 
 
-    parser.add_argument("--model_type",type=str,default=None,
-        help="The type of model (e.g. RN50, ViT-B/32).")
+    #parser.add_argument("--model_type",type=str,default='ViT-L/14',
+    #    help="The type of model (e.g. RN50, ViT-B/32).")
+    parser.add_argument("--model_type", type=str, default='ViT-L_14',
+                        help="The type of model (e.g. RN50, ViT-B_32, ViT-L_14_336px).")
 
     # about pre-training
     #parser.add_argument('-epochs_base', type=int, default=1000) # original version
-    parser.add_argument('-epochs_base', type=int, default=10)  # original version
+    parser.add_argument('-epochs_base', type=int, default=1)  # original version
     parser.add_argument('-epochs_new', type=int, default=1)
     parser.add_argument('-epochs_base_clf', type=int, default=1)
-    parser.add_argument('-lr_base', type=float, default=0.001)
+    parser.add_argument('-lr_base', type=float, default=1e-5)
     #parser.add_argument('-lr_base', type=float, default=0.005)
     parser.add_argument('-lr_new', type=float, default=0.1)
     parser.add_argument('-lr_new_enc', type=float, default=0.001)
@@ -46,8 +49,8 @@ def get_command_line_parser():
     parser.add_argument('-gamma', type=float, default=0.1)
     #parser.add_argument('-temperature', type=int, default=16)
 
-    #parser.add_argument('-batch_size_base', type=int, default=4)
-    parser.add_argument('-batch_size_base', type=int, default=16)
+    #parser.add_argument('-batch_size_base', type=int, default=2)
+    parser.add_argument('-batch_size_base', type=int, default=64)
     #parser.add_argument('-batch_sizebatasfdsadf_base', type=int, default=1)
     #parser.add_argument('-batch_size_new', type=int, default=0, help='set 0 will use all the availiable training image for new')
     parser.add_argument('-test_batch_size', type=int, default=100)
@@ -63,7 +66,7 @@ def get_command_line_parser():
 
     # about training
     #parser.add_argument('-gpu', default='0,1')
-    parser.add_argument('-gpu', default='0')
+    parser.add_argument('-gpu', default='0,1,2,3')
     parser.add_argument('-num_workers', type=int, default=8)
     #parser.add_argument('-num_workers', type=int, default=0)
 
@@ -140,8 +143,7 @@ def get_command_line_parser():
     parser.add_argument('-head_type', type=str, default='mlp', choices=['mlp', 'lin', 'none'])
     parser.add_argument('-head_dim', type=int, default=256)
 
-
-
+    parser.add_argument('-use_custom_coslr', action='store_true')
 
 
 
@@ -152,8 +154,11 @@ def get_command_line_parser():
 
     parser.add_argument("--data-location",type=str,default=os.path.expanduser('~/data'),
         help="The root directory for the datasets.")
-    parser.add_argument("--cache-dir",type=str,default=None,
+    parser.add_argument("--load_ft_model",type=str,default=None,
         help="Directory for caching features and encoder")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="File path for fine-tune model. !=None is second phase loading. "
+                             "this results loading both finetuned model and dicts saved right after ftr")
 
 
     return parser

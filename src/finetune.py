@@ -17,10 +17,12 @@ def finetune(args):
     # Check if checkpoints already exist
     zs_path = os.path.join(args.save, args.train_dataset, 'checkpoint_0.pt')  
     ft_path = os.path.join(args.save, args.train_dataset, f'checkpoint_{args.epochs}.pt')
+    """
+    # modified for debugging
     if os.path.exists(zs_path) and os.path.exists(ft_path):
         print(f'Skipping fine-tuning because {ft_path} exists.')
         return zs_path, ft_path
-
+    """
     assert args.train_dataset is not None, "Please provide a training dataset."
     if args.load is not None and args.load.endswith('pt'):
         image_encoder = ImageEncoder.load(args.load)

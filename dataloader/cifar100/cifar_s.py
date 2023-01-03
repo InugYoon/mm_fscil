@@ -181,6 +181,7 @@ class CIFAR10(VisionDataset):
             self.data, self.targets = self.SelectfromDefault(self.data, self.targets, index)
 
         self._load_meta()
+        #print(123)
 
     def SelectfromDefault(self, data, targets, index):
         data_tmp = []

@@ -133,6 +133,7 @@ class CUB200(Dataset):
         self.data = []
         self.targets = []
         self.data2label = {}
+        self.id2image = id2image
         if self.train:
             for k in train_idx:
                 image_path = os.path.join(root, 'CUB_200_2011/images', id2image[k])

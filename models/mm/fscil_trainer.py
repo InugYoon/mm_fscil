@@ -10,11 +10,11 @@ import torch.backends.cudnn as cudnn
 from utils_s import *
 from dataloader.data_utils_s import *
 from tensorboardX import SummaryWriter
-from .Network import MYNET, ImageClassifier, ImageEncoder, ClassificationHead, get_classification_head
+from .Network import MYNET, ImageClassifier, ImageEncoder, ClassificationHead, get_zeroshot_weights
 from tqdm import tqdm
 from SupConLoss import SupConLoss
-from src.datasets.common import get_dataloader, maybe_dictionarize
-from src.datasets.registry import get_dataset
+#from src.datasets.common import get_dataloader, maybe_dictionarize
+#from src.datasets.registry import get_dataset
 from src.utils import *
 
 class FSCILTrainer(object, metaclass=abc.ABCMeta):
@@ -25,7 +25,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
     def init_vars(self, args):
         # Setting arguments
         # if args.start_session == 0:
-        if args.load_dir == None:
+        if args.load_ft_model == None:
             args.secondphase = False
         else:
             args.secondphase = True
@@ -131,6 +131,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             else:
                 args.warmup_to = args.lr_base
 
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
         # sch_c: shcedule cosine
         # bdm: base_dataloader_mode
         # l: lambda
@@ -185,16 +186,21 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         save_path = '%s/' % args.dataset
         save_path = save_path + '%s/' % args.project
-        save_path = save_path + '%s-st_%d/' % (mode, args.start_session)
+        #save_path = save_path + '%s-st_%d/' % (mode, args.start_session)
         # save_path += 'mlp-ftenc'
-        zsl_path = args.model_type
-        args.zsl_save_path = save_path + zsl_path
+        zsl_save_path = save_path + '/' + args.model_type
+        zsl_save_path = os.path.join('checkpoint', zsl_save_path)
+        args.zsl_save_path = zsl_save_path
         ensure_path(args.zsl_save_path)
 
         ft_save_path = save_path + hyper_name_list
         ft_save_path = os.path.join('checkpoint', ft_save_path)
         args.ft_save_path = ft_save_path
         ensure_path(ft_save_path)
+
+        text_clf_weight_fn = 'head_%s_%s.pt' % (args.dataset, args.model_type)
+        args.text_clf_weight_fn = os.path.join(args.zsl_save_path, text_clf_weight_fn)
+
 
         # Setting dictionaries
         # clsD initialize
@@ -233,10 +239,10 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             bookD = book_val(args)
 
         else:
-            assert args.load_dir != None
+            assert args.load_ft_model != None
 
             # load objs
-            obj_dir = os.path.join(args.load_dir, 'saved_dicts')
+            obj_dir = os.path.join(args.load_ft_model, 'saved_dicts')
             with open(obj_dir, 'rb') as f:
                 dict_ = pickle.load(f)
                 procD = dict_['procD']
@@ -274,7 +280,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         return args, procD, clsD, bookD
 
-    def get_optimizer_base(self, args, model):
+    def get_optimizer_base(self, args, model, num_batches):
 
         if args.base_freeze_backbone:
             for param in model.encoder.module.parameters():
@@ -286,6 +292,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         #                             lr=0.0003, weight_decay=0.0008)
 
         # optimizer = torch.optim.SGD(model.parameters(), #####
+        """
         optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()),
                                     # optimizer = torch.optim.SGD(model.module.parameters(),
                                     # args.lr_base, momentum=0.9, nesterov=True, weight_decay=args.decay)
@@ -299,6 +306,10 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                                                              gamma=args.gamma)
         elif args.schedule == 'Cosine':
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_base)
+        """
+        params = [p for p in model.module.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(params, lr=args.lr_base, weight_decay=args.wd)
+        scheduler = cosine_lr(optimizer, args.lr_base, args.warmup_length, args.epochs_base * num_batches)
 
         return model, optimizer, scheduler
 
@@ -352,17 +363,25 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         return model, optimizer, scheduler
 
+
+
+
     def base_train(self, args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler, epoch,
-                   supcon_criterion=None):
+                   loss_fn, supcon_criterion=None):
+
         tl = Averager()
         ta = Averager()
         # self.model = self.model.train()
         model.train()
+        num_batches = len(trainloader)
+
         # standard classification for pretrain
         tqdm_gen = tqdm(trainloader)
         for i, batch in enumerate(tqdm_gen, 1):
+
+            step = i + epoch * num_batches
+            scheduler(step)
             procD['step'] += 1
-            warmup_learning_rate(args, epoch, i, len(trainloader), optimizer)
 
             if args.base_doubleaug is False:
                 data, train_label = [_.cuda() for _ in batch]
@@ -376,85 +395,38 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 train_label = train_label.repeat(2)
                 target_cls = clsD['class_maps'][0][train_label]
 
-            model.set_mode('encoder')
-            data = model(data)
-            bsz_ = data.shape[0]
-            bsz_half = bsz_ // 2
-            data_f = data[:bsz_half]
-            data_b = data[bsz_half:]
-            targets_ = target_cls[:bsz_half]
-            # tasks 대신 seen_unsort / seen_unsort_map으로 바꾼 후 아래랑 합쳐도 무방.
-            if not args.base_doubleaug:
-                assert args.use_supconloss == False
-                assert args.use_cskdloss_1 == False
-                assert args.use_cskdloss_2 == False
 
-                if not args.base_dataloader_mode == 'pair':
-                    assert args.use_celoss == True
-                    model.set_mode(args.fw_mode)
-                    if args.fw_mode == 'fc_cosface' or args.fw_mode == 'fc_arcface':
-                        logits_cls, _ = model(data, target_cls, sess=procD['session'], doenc=False)
-                    else:
-                        logits_cls = model(data, sess=procD['session'], doenc=False)
-                    loss = F.cross_entropy(logits_cls, target_cls)
-                    acc = count_acc(logits_cls, target_cls)
-                    total_loss = loss
-                else:
-                    model.set_mode(args.fw_mode)
-                    if args.fw_mode == 'fc_cosface' or args.fw_mode == 'fc_arcface':
-                        logits_cls_f, _ = model(data_f, targets_, sess=procD['session'], doenc=False)
-                        with torch.no_grad():
-                            logits_cls_b, _ = model(data_b, targets_, sess=procD['session'], doenc=False)
-                    else:
-                        logits_cls_f = model(data_f, sess=procD['session'], doenc=False)
-                        with torch.no_grad():
-                            logits_cls_b = model(data_b, sess=procD['session'], doenc=False)
+            inputs = data
+            labels = target_cls
+            """
+            batch = maybe_dictionarize(batch)
+            inputs = batch['images'].cuda()
+            labels = batch['labels'].cuda()
+            data_time = time.time() - start_time
+            """
 
-                    # total_loss=0.0
-                    total_loss = torch.tensor(0.0).cuda()
-                    if args.use_celoss:
-                        loss_pair_ce = F.cross_entropy(logits_cls_f, targets_)
-                        total_loss += loss_pair_ce
-                    """
-                    if args.use_cskdloss_1:
-                        loss_cskd = kdloss(logits_cls_f, logits_cls_b.detach()) * args.lamda
-                        total_loss += loss_cskd
-                    if args.use_cskdloss_2:
-                        raise NotImplementedError
-                    """
-                    if total_loss == 0:
-                        print("loss is zero loss args needed")
-                    acc = count_acc(logits_cls_f, targets_)
-            else:
+            logits = model(inputs, sess=procD['session'])
+            loss = loss_fn(logits, labels)
 
-                model.set_mode(args.fw_mode)
-                if args.fw_mode == 'fc_cosface' or args.fw_mode == 'fc_arcface':
-                    # logits_cls, wf = model(data, target_cls, sess=procD['session'], doenc=False) #####
-                    logits_cls, _ = model(data, target_cls, sess=procD['session'], doenc=False)  #####
-                else:
-                    logits_cls = model(data, sess=procD['session'], doenc=False)
+            params = [p for p in model.module.parameters() if p.requires_grad]
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
 
-                total_loss = torch.tensor(0.0).cuda()
-                if args.use_celoss:
-                    # """
-                    loss_ce = F.cross_entropy(logits_cls, target_cls)
-                    total_loss += loss_ce
-                    # """ ####
 
-                if args.use_supconloss:
-                    # args.use_head asserted true
-                    model.set_mode('head')
-                    features = model(data, doenc=False)
-                    f1, f2 = torch.split(features, [bsz_half, bsz_half], dim=0)
-                    features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-                    loss_supcon = supcon_criterion(features, targets_)
-                    total_loss += loss_supcon
+            if i % args.print_every == 0:
+                percent_complete = 100 * i / len(trainloader)
+                print(
+                    f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{len(trainloader)}]\t"
+                    f"Loss: {loss.item():.6f}", flush=True
+                )
 
-                acc = count_acc(logits_cls, target_cls)
 
-            lrc = scheduler.get_last_lr()[0]
+            acc = count_acc(logits, labels)
+            total_loss = loss
+
+            if not args.use_custom_coslr:
+                lrc = scheduler.get_last_lr()[0]
             tqdm_gen.set_description(
-                'Session 0, epo {}, lrc={:.4f},total loss={:.4f} acc={:.4f}'.format(epoch, lrc, total_loss.item(), acc))
+                'Session 0, epo {}, total loss={:.4f} acc={:.4f}'.format(epoch, total_loss.item(), acc))
             tl.add(total_loss.item())
             ta.add(acc)
 
@@ -465,89 +437,25 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             # self.step += 1
         tl = tl.item()
         ta = ta.item()
-        return tl, ta
-
-
-    def finetune(self, args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler, epoch,
-                   params, loss_fn, supcon_criterion=None):
-        model.train()
-        model = model.cuda()
-        num_batches = len(trainloader)
-
-        for i, batch in enumerate(trainloader):
-            start_time = time.time()
-
-            step = i + epoch * num_batches
-            scheduler(step)
-            optimizer.zero_grad()
-
-            batch = maybe_dictionarize(batch)
-            inputs = batch['images'].cuda()
-            labels = batch['labels'].cuda()
-            data_time = time.time() - start_time
-
-            logits = model(inputs)
-            loss = loss_fn(logits, labels)
-            loss.backward()
-
-            torch.nn.utils.clip_grad_norm_(params, 1.0)
-
-            optimizer.step()
-            batch_time = time.time() - start_time
-
-            if i % args.print_every == 0:
-                percent_complete = 100 * i / len(trainloader)
-                print(
-                    f"Train Epoch: {epoch} [{percent_complete:.0f}% {i}/{len(trainloader)}]\t"
-                    f"Loss: {loss.item():.6f}\tData (t) {data_time:.3f}\tBatch (t) {batch_time:.3f}", flush=True
-                )
-
-        image_encoder = model.module.image_encoder
 
         # Saving model
+        """
+        image_encoder = model.module.image_encoder
         if args.save is not None:
             os.makedirs(args.save, exist_ok=True)
             model_path = os.path.join(args.save, args.train_dataset, f'checkpoint_{epoch + 1}.pt')
             image_encoder.save(model_path)
-            optim_path = os.path.join(args.save, args.train_dataset, f'optim_{epoch + 1}.pt')
-            torch.save(optimizer.state_dict(), optim_path)
-
         if args.save is not None:
             zs_path = os.path.join(args.save, args.train_dataset, 'checkpoint_0.pt')
             ft_path = os.path.join(args.save, args.train_dataset, f'checkpoint_{args.epochs}.pt')
             return zs_path, ft_path
+        """
 
-    def evaluate(image_encoder, dataset_name, args, testloader):
-        classification_head = get_classification_head(args, dataset_name)
-        model = ImageClassifier(image_encoder, classification_head)
-
-        model.eval()
+        return tl, ta
 
 
-        batched_data = enumerate(testloader)
-        device = args.device
 
-        model = model.to(device)
-        with torch.no_grad():
-            top1, correct, n = 0., 0., 0.
-            for i, data in batched_data:
-                data = maybe_dictionarize(data)
-                x = data['images'].to(device)
-                y = data['labels'].to(device)
 
-                logits = get_logits(x, model)
-
-                pred = logits.argmax(dim=1, keepdim=True).to(device)
-
-                correct += pred.eq(y.view_as(pred)).sum().item()
-
-                n += y.size(0)
-
-            top1 = correct / n
-
-        metrics = {'top1': top1}
-
-        return metrics
 
 
 
@@ -562,11 +470,9 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             tqdm_gen = tqdm(testloader)
             for i, batch in enumerate(tqdm_gen, 1):
                 data, test_label = [_.cuda() for _ in batch]
-                if args.fw_mode == 'fc_cosface' or args.fw_mode == 'fc_arcface':
-                    model.set_mode('fc_cos')
-                else:
-                    model.set_mode(args.fw_mode)
-                logits = model(data, sess=procD['session'])
+                #logits = get_logits(data, model)
+                logits = model(data, procD['session'])
+
 
                 if session == 0:
                     # logits_cls = logits[:, clsD['tasks'][0]]
@@ -597,6 +503,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
 
 
+
     def main(self, args):
         timer = Timer()
         args, procD, clsD, bookD = self.init_vars(args)
@@ -608,17 +515,64 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         # model = MYNET(args, mode=args.base_mode)
         # model = SupConResNet(name=opt.model)
-        model = MYNET(args, fw_mode=args.fw_mode)
+
+        if args.dataset == 'cifar100':
+            tmp_trainset = args.Dataset.CIFAR100(args, train=True, shotpercls=args.shotpercls, base_sess=True,
+                                                 root=args.dataroot, doubleaug=args.base_doubleaug, download=True,
+                                                 index=np.array(args.task_class_order))
+            args.dataset_label2txt = {v: k for k, v in tmp_trainset.class_to_idx.items()}
+        elif args.dataset == 'mini_imagenet':
+            tmp_trainset = args.Dataset.MiniImageNet(args, train=True, shotpercls=args.shotpercls, base_sess=True,
+                                                 root=args.dataroot, doubleaug=args.base_doubleaug,
+                                                     index=np.array(args.task_class_order))
+            mini_dic_loc = 'dataloader/miniimagenet/imagenet_label_textdic'
+            with open(mini_dic_loc, 'rb') as f:
+                mini_dic = pickle.load(f)
+            args.dataset_label2txt = {}
+            for i in range(args.num_classes):
+                args.dataset_label2txt[i] = mini_dic[tmp_trainset.wnids[i]]
+        elif args.dataset == 'cub200':
+            tmp_trainset = args.Dataset.CUB200(args, train=True, shotpercls=args.shotpercls, base_sess=True,
+                                           root=args.dataroot, doubleaug=args.base_doubleaug,
+                                           index=np.array(args.task_class_order))
+            mini_dic = {}
+            for key, value in tmp_trainset.id2image.items():
+                _str = value.split('/')[0]
+                strs = _str.split('.')
+                mini_dic[int(strs[0])-1] = strs[1]
+            args.dataset_label2txt = mini_dic
+
+        else:
+            raise NotImplementedError
+
+
+
+        if os.path.exists(args.text_clf_weight_fn):
+            print(f'Classification head for {args.model_type} on {args.dataset} exists at {args.text_clf_weight_fn}')
+            print('Loading %s'%(args.text_clf_weight_fn))
+            textual_clf_weights = torch.load(args.text_clf_weight_fn)
+        else:
+            textual_clf_weights = get_zeroshot_weights(args)
+            torch.save(textual_clf_weights, args.text_clf_weight_fn)
+            #textual_clf_weights.save(args.text_clf_head_path)
+        model = MYNET(args, fw_mode=args.fw_mode, textual_clf_weights=textual_clf_weights)
+
+        #if args.load_dir is not None:
+        if args.load_ft_model is not None:
+            print('Loading init parameters from: %s_%s' % (args.load_ft_model))
+            load_ft_model_weight = torch.load(args.load_ft_model)['params']
+            model.load_state_dict(load_ft_model_weight, strict=True)
+
+
         # model = MYNET(args, fw_mode=args.fw_mode)
         # model = SupConResNet(name=opt.model, head='linear')
         criterion = SupConLoss(temperature=args.supcontemp, supcon_angle=args.supcon_angle)
 
-        if torch.cuda.is_available():
-            if torch.cuda.device_count() > 1:
-                model.encoder = torch.nn.DataParallel(model.encoder, list(range(args.num_gpu)))
-            model = model.cuda()
-            criterion = criterion.cuda()
-            cudnn.benchmark = True
+        model = nn.DataParallel(model, list(range(args.num_gpu)))
+        model = model.cuda()
+        criterion = criterion.cuda()
+        cudnn.benchmark = True
+
         supcon_criterion = SupConLoss(temperature=args.supcontemp, supcon_angle=args.supcon_angle)
         kdloss = KDLoss(args.s)
 
@@ -636,34 +590,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         t_start_time = time.time()
 
-        if args.load_dir is not None:
-            assert args.model_name is not None
-            print('Loading init parameters from: %s_%s' % (args.load_dir, args.model_name))
-            model_dir = os.path.join(args.load_dir, args.model_name)
-            best_model_dict = torch.load(model_dir)['params']
-            ##### TBD to remove
-            # """
-            # best_model_dict = torch.load(model_dir)['model']
-            """
-            new_state_dict = {}
-            for k, v in best_model_dict.items():
-                #k = k.replace("module.", "")
-                kk = k.split('.')
-                str_ = kk[1] + '.' + kk[0]
-                for i in range(2,len(kk)):
-                    str_ += ('.'+kk[i])
-                new_state_dict[str_] = v
-                #new_state_dict[k] = v
-            best_model_dict = new_state_dict
-            """
-            msg = model.load_state_dict(best_model_dict, strict=False)
-            print(msg)
-            # """
-        else:
-            print('random init params')
-            if args.start_session > 0:
-                print('WARING: Random init weights for new sessions!')
-            best_model_dict = deepcopy(model.state_dict())
+
+
 
         # init train statistics
         result_list = [args]
@@ -700,84 +628,27 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
             if session == 0:
                 train_set, trainloader, testloader = get_dataloader(args, procD, clsD, bookD)
+                trainloader.dataset.transform = model.module.train_preprocess
+                trainloader.dataset.transform2 = model.module.train_preprocess
+                testloader.dataset.transform = model.module.val_preprocess
             else:
                 train_set, trainloader, testloader, new_testloader, prev_testloader, new_all_testloader, base_testloader \
                     = get_dataloader(args, procD, clsD, bookD)
-
-            # model.load_state_dict(best_model_dict)
-            ### TBD To be removed, or not.
-            model.load_state_dict(best_model_dict, strict=False)
-
-
-
-
-
+                trainloader.dataset.transform = model.module.train_preprocess
+                trainloader.dataset.transform2 = model.module.train_preprocess
+                testloader.dataset.transform = model.module.val_preprocess
+                new_testloader.dataset.transform = model.module.val_preprocess
+                prev_testloader.dataset.transform = model.module.val_preprocess
+                base_testloader.dataset.transform = model.module.val_preprocess
+                new_all_testloader.dataset.transform = model.module.val_preprocess
 
 
-            # If args.load is not None and designate zsl and fine-tune model, load. else, don't load.
-            # File path (args.name) should be made with my parameters.
-
-            # Check if checkpoints already exist
-            """
-            zs_path = os.path.join(args.save, args.train_dataset, 'checkpoint_0.pt')
-            ft_path = os.path.join(args.save, args.train_dataset, f'checkpoint_{args.epochs}.pt')
-            if os.path.exists(zs_path) and os.path.exists(ft_path):
-                print(f'Skipping fine-tuning because {ft_path} exists.')
-                return zs_path, ft_path
-
-            if args.load is not None and args.load.endswith('pt'):
-                image_encoder = ImageEncoder.load(args.load)
-            else:
-                print('Building image encoder.')
-                image_encoder = ImageEncoder(args, keep_lang=False)
-            """
-            #image_encoder = ImageEncoder(args, keep_lang=False)
-            #classification_head = get_classification_head(args, args.train_dataset)
-            #model = ImageClassifier(image_encoder, classification_head)
-            model = MYNET(args)
-            model.freeze_head()
-            preprocess_fn = model.train_preprocess
+            model.module.freeze_head()
             args.print_every = 100
-            dataset = get_dataset(
-                args.dataset,
-                preprocess_fn,
-                location=args.data_location,
-                batch_size=args.batch_size_base
-            )
-            num_batches = len(dataset.train_loader)
 
-            devices = list(range(torch.cuda.device_count()))
-            print('Using devices', devices)
-            model = torch.nn.DataParallel(model, device_ids=devices)
-
+            # Should erase this part. but how to use preprocess_fn on existing dataloader? train & test.
+            num_batches = len(trainloader)
             loss_fn = torch.nn.CrossEntropyLoss()
-
-            params = [p for p in model.parameters() if p.requires_grad]
-            optimizer = torch.optim.AdamW(params, lr=args.lr_base, weight_decay=args.wd)
-            scheduler = cosine_lr(optimizer, args.lr_base, args.warmup_length, args.epochs_base * num_batches)
-
-            # Saving model
-            if args.save is not None:
-                os.makedirs(args.save, exist_ok=True)
-                model_path = os.path.join(args.save, args.train_dataset, f'checkpoint_0.pt')
-                model.module.image_encoder.save(model_path)
-
-            trainloader = get_dataloader(
-                dataset, is_train=True, args=args, image_encoder=None)
-
-            testloader = get_dataloader(
-                dataset, is_train=False, args=args, image_encoder=None)
-
-            self.evaluate(args)
-
-            testdataset = get_dataset(
-                args.dataset,
-                model.val_preprocess,
-                location=args.data_location,
-                batch_size=args.batch_size_base
-            )
-            testloader = get_dataloader(
-                testdataset, is_train=False, args=args, image_encoder=None)
 
 
 
@@ -792,7 +663,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                         base_angle_exp(args, testloader, False, procD, clsD, model)
 
                 print('new classes for this session:\n', np.unique(train_set.targets))
-                model, optimizer, scheduler = self.get_optimizer_base(args, model)
+                model, optimizer, scheduler = self.get_optimizer_base(args, model, num_batches)
 
                 angles = []
                 for epoch in range(args.epochs_base):
@@ -807,20 +678,20 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
                     #tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
                     #                         epoch, supcon_criterion)
-                    tl, ta = self.finetune(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
-                                                epoch, params, loss_fn, supcon_criterion)
+                    tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                                                epoch, loss_fn, supcon_criterion)
 
                     # test model with all seen class
-                    tsl, tsa = self.evaluate(args, model, procD, clsD, testloader)  ####
+                    tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
                     # tsl, tsa = self.test2(args, model, procD, clsD, trainloader, testloader)  ####
 
                     # save better model
                     if (tsa * 100) >= procD['trlog']['max_acc'][session]:
                         procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
                         procD['trlog']['max_acc_epoch'] = epoch
-                        save_model_dir = os.path.join(args.save_path, 'session' + str(session) + '_max_acc.pth')
+                        save_model_dir = os.path.join(args.ft_save_path, 'session' + str(session) + '_max_acc.pth')
                         torch.save(dict(params=model.state_dict()), save_model_dir)
-                        torch.save(optimizer.state_dict(), os.path.join(args.save_path, 'optimizer_best.pth'))
+                        #torch.save(optimizer.state_dict(), os.path.join(args.ft_save_path, 'optimizer_best.pth'))
                         best_model_dict = deepcopy(model.state_dict())
                         print('********A better model is found!!**********')
                         print('Saving model to :%s' % save_model_dir)
@@ -831,22 +702,22 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     procD['trlog']['train_acc'].append(ta)
                     procD['trlog']['test_loss'].append(tsl)
                     procD['trlog']['test_acc'].append(tsa)
-                    lrc = scheduler.get_last_lr()[0]
                     result_list.append(
-                        'epoch:%03d,lr:%.4f,training_loss:%.5f,training_acc:%.5f,test_loss:%.5f,test_acc:%.5f' % (
-                            epoch, lrc, tl, ta, tsl, tsa))
+                        'epoch:%03d,training_loss:%.5f,training_acc:%.5f,test_loss:%.5f,test_acc:%.5f' % (
+                            epoch, tl, ta, tsl, tsa))
                     print('This epoch takes %d seconds' % (time.time() - start_time),
                           '\nstill need around %.2f mins to finish this session' % (
                                   (time.time() - start_time) * (args.epochs_base - epoch) / 60))
                     writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
                     writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa, epoch)
-                    writer.add_scalar('Session {0} - Learning rate/train'.format(session), lrc, epoch)
-                    scheduler.step()
+                    writer.add_scalar('Session {0} - Learning rate/train'.format(session), epoch)
+                    #scheduler.step()
 
-                    if epoch == args.epochs_base - 1 or epoch % args.save_freq == 0:
-                        save_model_dir = os.path.join(args.save_path, 'session' + str(session) \
+                    if epoch == args.epochs_base-1:
+                        save_model_dir = os.path.join(args.ft_save_path, 'session' + str(session) \
                                                       + '_epo' + str(epoch) + '_acc.pth')
                         torch.save(dict(params=model.state_dict()), save_model_dir)
+                        save_obj(args.ft_save_path, procD, clsD, bookD)
 
                 if args.plot_tsne:
                     base_tsne_idx = torch.arange(args.base_class)[
@@ -878,78 +749,18 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 result_list.append('Session {}, Test Best Epoch {},\nbest test Acc {:.4f}\n'.format(
                     session, procD['trlog']['max_acc_epoch'], procD['trlog']['max_acc'][session], ))
 
-                if not args.no_rbfc:
-                    if args.plot_tsne:
-                        base_tsne_idx = torch.arange(args.base_class)[
-                            torch.randperm(args.base_class)[:draw_base_cls_num]]
-                        palette = np.array(sns.color_palette("hls", args.base_class))
-                        data_, label_ = tot_datalist(args, trainloader, model, args.base_doubleaug, \
-                                                     clsD['seen_unsort_map'], gpu=False)
-                        data_, label_ = selec_datalist(args, data_, label_, base_tsne_idx, draw_n_per_basecls)
-                        draw_tsne(data_, label_, n_components, perplexity, palette, base_tsne_idx, 'base train')
-
-                        data_, label_ = tot_datalist(args, testloader, model, False, clsD['seen_unsort_map'], gpu=False)
-                        data_, label_ = selec_datalist(args, data_, label_, base_tsne_idx, draw_n_per_basecls)
-                        draw_tsne(data_, label_, n_components, perplexity, palette, base_tsne_idx, 'base test')
-
-                    # model.load_state_dict(best_model_dict)
-                    # model = self.replace_base_fc(args, model, clsD, train_set, testloader.dataset.transform)
-                    model = self.replace_clf(args, model, procD, clsD, trainloader, testloader.dataset.transform,
-                                             args.rbfc_opt2)
-                    best_model_dir = os.path.join(args.save_path, 'session' + str(session) + '_base_rbfc_acc.pth')
-                    print('Replace the fc with average embedding, and save it to :%s' % best_model_dir)
-                    best_model_dict = deepcopy(model.state_dict())
-                    torch.save(dict(params=model.state_dict()), best_model_dir)
-
-                    if args.plot_tsne:
-                        base_tsne_idx = torch.arange(args.base_class)[
-                            torch.randperm(args.base_class)[:draw_base_cls_num]]
-                        palette = np.array(sns.color_palette("hls", args.base_class))
-                        data_, label_ = tot_datalist(args, trainloader, model, args.base_doubleaug, \
-                                                     clsD['seen_unsort_map'], gpu=False)
-                        data_, label_ = selec_datalist(args, data_, label_, base_tsne_idx, draw_n_per_basecls)
-                        draw_tsne(data_, label_, n_components, perplexity, palette, base_tsne_idx, 'base train')
-
-                        data_, label_ = tot_datalist(args, testloader, model, False, clsD['seen_unsort_map'], gpu=False)
-                        data_, label_ = selec_datalist(args, data_, label_, base_tsne_idx, draw_n_per_basecls)
-                        draw_tsne(data_, label_, n_components, perplexity, palette, base_tsne_idx, 'base test')
-
-                    # model.module.set_mode('fc_cos')
-                    print('After all epochs, test')
-                    tsl, tsa = self.test(args, model, procD, clsD, testloader)
-                    result_list.append(
-                        'rbfc, test_loss:%.5f,test_acc:%.5f' % (
-                            tsl, tsa))
-
-                    procD['trlog']['max_acc_base_rbfc'] = float('%.3f' % (tsa * 100))
-                    # if (tsa * 100) >= procD['trlog']['max_acc'][session]:
-                    print('The rbfc test acc of base session={:.3f}'.format(procD['trlog']['max_acc_base_rbfc']))
-                    if args.angle_exp:
-                        afterrbfc_inter_angles, afterrbfc_intra_angle_mean, afterrbfc_intra_angle_std, \
-                        afterrbfc_angle_feat_fc, afterrbfc_angle_feat_fc_std, afterrbfc_angle_featmean_fc = \
-                            base_angle_exp(args, trainloader, args.base_doubleaug, procD, clsD, model,
-                                           testloader.dataset.transform)
-                        te_afterrbfc_inter_angles, te_afterrbfc_intra_angle_mean, te_afterrbfc_intra_angle_std, \
-                        te_afterrbfc_angle_feat_fc, te_afterrbfc_angle_feat_fc_std, te_afterrbfc_angle_featmean_fc = \
-                            base_angle_exp(args, testloader, False, procD, clsD, model)
-                        # print('aia:', afterrbfc_inter_angles)
-                        # print('taia:',te_afterrbfc_inter_angles)
-                    result_list.append('Session {}, Test rbfc ,\nbest test Acc {:.4f}\n'.format(
-                        session, procD['trlog']['max_acc_base_rbfc'], ))
-
-
-
 
             else:  # incremental learning sessions
                 print("training session: [%d]" % session)
 
+                """
                 model, optimizer, scheduler = self.get_optimizer_new(args, model)
                 transform_ = trainloader.dataset.transform
                 trainloader.dataset.transform = testloader.dataset.transform
                 model = self.replace_clf(args, model, procD, clsD, trainloader, testloader.dataset.transform,
                                          args.rbfc_opt2)
                 trainloader.dataset.transform = transform_
-
+                
                 for epoch in range(args.epochs_new):
                     procD['epoch'] += 1
                     start_time = time.time()
@@ -961,7 +772,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     tsl, tsa = self.test(args, model, procD, clsD, testloader)
 
                     # save better model
-                    """
+                    
                     if (tsa * 100) >= procD['trlog']['max_acc'][session]:
                         procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
                         procD['trlog']['max_acc_epoch'] = epoch
@@ -971,7 +782,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                         best_model_dict = deepcopy(model.state_dict())
                         print('********A better model is found!!**********')
                         print('Saving model to :%s' % save_model_dir)
-                     """
+                     
                     print('epoch {}, test acc={:.3f}'.format(epoch, tsa))
                     lrc = scheduler.get_last_lr()[0]
                     if epoch % 10 == 0:
@@ -979,7 +790,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                             'epoch:%03d,lr:%.4f,training_loss:%.5f,training_acc:%.5f,test_loss:%.5f,test_acc:%.5f' % (
                                 epoch, lrc, tl, ta, tsl, tsa))
                     scheduler.step()
-
+                """
                 # model.module.set_mode(args.new_mode)
                 model.eval()
 
@@ -991,23 +802,12 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 _, btsa = self.test(args, model, procD, clsD, base_testloader)
                 _, natsa = self.test(args, model, procD, clsD, new_all_testloader)
 
-                prev_new_clf_ratio = self.newtest(args, model, procD, clsD, prev_testloader)
-                new_new_clf_ratio = self.newtest(args, model, procD, clsD, new_testloader)
-
                 # save model
                 procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
                 procD['trlog']['new_max_acc'][session] = float('%.3f' % (ntsa * 100))
                 procD['trlog']['new_all_max_acc'][session] = float('%.3f' % (natsa * 100))
                 procD['trlog']['base_max_acc'][session] = float('%.3f' % (btsa * 100))
                 procD['trlog']['prev_max_acc'][session] = float('%.3f' % (ptsa * 100))
-                procD['trlog']['prev_new_clf_ratio'][session] = float('%.3f' % (prev_new_clf_ratio * 100))
-                procD['trlog']['new_new_clf_ratio'][session] = float('%.3f' % (new_new_clf_ratio * 100))
-
-                save_model_dir = os.path.join(args.save_path, 'session' + str(session) + '_max_acc.pth')
-                torch.save(dict(params=model.state_dict()), save_model_dir)
-                best_model_dict = deepcopy(model.state_dict())
-                print('Saving model to :%s' % save_model_dir)
-                print('  test acc={:.3f}'.format(procD['trlog']['max_acc'][session]))
 
                 result_list.append(
                     'Session {}, test Acc {:.3f}\n'.format(session, procD['trlog']['max_acc'][session]))
@@ -1078,10 +878,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         print('new_all_max_acc:', procD['trlog']['new_all_max_acc'])
         print('base_max_acc:', procD['trlog']['base_max_acc'])
         print('prev_max_acc:', procD['trlog']['prev_max_acc'])
-        print('prev_new_clf_ratio:', procD['trlog']['prev_new_clf_ratio'])
-        print('new_new_clf_ratio:', procD['trlog']['new_new_clf_ratio'])
-        save_list_to_txt(os.path.join(args.save_path, 'results.txt'), result_list)
-        save_obj(args.save_path, procD, clsD, bookD)
+        save_list_to_txt(os.path.join(args.ft_save_path, 'results.txt'), result_list)
+        #save_obj(args.ft_save_path, procD, clsD, bookD)
 
         print('Base Session Best epoch:', procD['trlog']['max_acc_epoch'])
 
@@ -1096,10 +894,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                   afterbase_angle_feat_fc, afterbase_angle_feat_fc_std, afterbase_angle_featmean_fc)
             print(te_afterbase_inter_angles, te_afterbase_intra_angle_mean, te_afterbase_intra_angle_std, \
                   te_afterbase_angle_feat_fc, te_afterbase_angle_feat_fc_std, te_afterbase_angle_featmean_fc)
-            print(afterrbfc_inter_angles, afterrbfc_intra_angle_mean, afterrbfc_intra_angle_std, \
-                  afterrbfc_angle_feat_fc, afterrbfc_angle_feat_fc_std, afterrbfc_angle_featmean_fc)
-            print(te_afterrbfc_inter_angles, te_afterrbfc_intra_angle_mean, te_afterrbfc_intra_angle_std, \
-                  te_afterrbfc_angle_feat_fc, te_afterrbfc_angle_feat_fc_std, te_afterrbfc_angle_featmean_fc)
+
             print('inc exp result')
             print(l_inter_angles_base)
             print(l_angle_intra_mean_base)
@@ -1119,45 +914,3 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             print(l_angle_featmean_fc_inc)
             print('angles')
             print(angles)
-
-    def replace_clf(self, args, model, procD, clsD, trainloader, transform, opt2=False):
-        # replace fc.weight with the embedding average of train data
-        session = procD['session']
-        model.eval()
-
-        loader = deepcopy(trainloader)
-        loader.dataset.transform = transform
-        if session == 0:
-            embedding_list, label_list = tot_datalist(args, loader, model, doubleaug=args.base_doubleaug, map=None,
-                                                      gpu=False)
-        else:
-            embedding_list, label_list = tot_datalist(args, loader, model, doubleaug=args.inc_doubleaug, map=None,
-                                                      #                                          map=clsD['class_maps'][session], gpu=False)
-                                                      gpu=False)
-        label_list = label_list.cuda()
-        mean_list = []
-
-        for class_index in clsD['tasks'][session]:
-            # for class_index in range(len(model.module.angle_w[session].data)):
-            data_index = (label_list == class_index).nonzero()
-            embedding_this = embedding_list[data_index.squeeze(-1)]
-            if args.rpclf_normmean:
-                embedding_this = F.normalize(embedding_this).mean(0)
-            else:
-                embedding_this = embedding_this.mean(0)
-            mean_list.append(embedding_this)
-
-        mean_list = torch.stack(mean_list, dim=0)
-
-        bsc_ = args.base_class
-        way_ = args.way
-        if 'fc' in args.fw_mode:
-            # model.module.fc.weight.data[clsD['tasks'][session]] = proto_list.cuda()
-            if session == 0:
-                model.fc.weight.data[:bsc_] = mean_list.cuda()
-            else:
-                model.fc.weight.data[bsc_ + way_ * (session - 1): bsc_ + way_ * session] = mean_list.cuda()
-        else:
-            model.angle_w[session].data = mean_list.cuda()
-
-        return model
