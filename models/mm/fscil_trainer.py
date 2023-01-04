@@ -719,6 +719,18 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                         torch.save(dict(params=model.state_dict()), save_model_dir)
                         save_obj(args.ft_save_path, procD, clsD, bookD)
 
+                if args.epochs_base == 0:
+                    tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
+                    procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
+                    procD['trlog']['test_loss'].append(tsl)
+                    procD['trlog']['test_acc'].append(tsa)
+                    result_list.append(
+                        'epoch:%03d, test_loss:%.5f,test_acc:%.5f' % (
+                            epoch, tsl, tsa))
+                    writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa, epoch)
+                    writer.add_scalar('Session {0} - Learning rate/train'.format(session), epoch)
+                    # scheduler.step()
+
                 if args.plot_tsne:
                     base_tsne_idx = torch.arange(args.base_class)[
                         torch.randperm(args.base_class)[:draw_base_cls_num]]
