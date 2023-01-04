@@ -720,6 +720,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                         save_obj(args.ft_save_path, procD, clsD, bookD)
 
                 if args.epochs_base == 0:
+                    epoch = -1
                     tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
                     procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
                     procD['trlog']['test_loss'].append(tsl)
