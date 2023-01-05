@@ -341,7 +341,8 @@ def tot_datalist(args, dataloader, model, doubleaug, map=None, gpu=False, module
             else:
                 data = batch[0][0].cuda()
                 label = batch[1].cuda()
-            data = model(data).detach()
+            #data = model(data).detach()
+            data = model.module.clip_img_encoder(data).detach()
             if gpu==True:
                 data_.append(data)
                 label_.append(label)
@@ -480,7 +481,7 @@ def get_intra_angle(feats):
 def base_angle_exp(args, base_loader, doubleaug, procD, clsD, model, transform=None):
     if transform is not None:
         base_loader.dataset.transform = transform
-    dd_ = tot_datalist(args, base_loader, model, doubleaug=doubleaug)
+    dd_ = tot_datalist(args, base_loader, model, doubleaug=doubleaug, module=True)
     cls = clsD['tasks'][0].cpu()
     d_ = []
     for i in cls:
@@ -504,11 +505,14 @@ def base_angle_exp(args, base_loader, doubleaug, procD, clsD, model, transform=N
         intra_mean.append(intra_mean_)
         intra_std.append(intra_std_)
 
-        mean_feats_fc_angle_, std_feats_fc_angle_ = get_angle_feats_vec(d_[ii], model.fc.weight[ii].cpu())
+        #mean_feats_fc_angle_, std_feats_fc_angle_ = get_angle_feats_vec(d_[ii], model.fc.weight[ii].cpu())
+        mean_feats_fc_angle_, std_feats_fc_angle_ = get_angle_feats_vec(d_[ii], model.module.textual_classifier.weight[ii].cpu())
         mean_feats_fc_angle.append(mean_feats_fc_angle_)
         std_feats_fc_angle.append(std_feats_fc_angle_)
 
-        featmean_fc_angle_ = F.linear(F.normalize(mean_, dim=0), F.normalize(model.fc.weight[ii].cpu(), dim=0)).clamp(-1, 1)
+        #featmean_fc_angle_ = F.linear(F.normalize(mean_, dim=0), F.normalize(model.fc.weight[ii].cpu(), dim=0)).clamp(-1, 1)
+        featmean_fc_angle_ = F.linear(F.normalize(mean_, dim=0), F.normalize(model.module.textual_classifier.weight[ii].cpu(), dim=0)).clamp(
+            -1, 1)
         featmean_fc_angle_ = torch.acos(featmean_fc_angle_) * 180 / math.pi
         featmean_fc_angle.append(featmean_fc_angle_)
 
@@ -534,8 +538,8 @@ def base_angle_exp(args, base_loader, doubleaug, procD, clsD, model, transform=N
 
 def inc_angle_exp(args, base_testloader, new_testloader, doubleaug, procD, clsD, model):
 
-    dd_base = tot_datalist(args, base_testloader, model, False)
-    dd_inc = tot_datalist(args, new_testloader, model, False)
+    dd_base = tot_datalist(args, base_testloader, model, False, module=True)
+    dd_inc = tot_datalist(args, new_testloader, model, False, module=True)
     session = procD['session']
     start_class = args.base_class + args.way * (session - 1)
 
@@ -568,15 +572,15 @@ def inc_angle_exp(args, base_testloader, new_testloader, doubleaug, procD, clsD,
         intra_mean_base_, intra_std_base_ = get_intra_angle(d_base[ii])
         intra_mean_base.append(intra_mean_base_)
         intra_std_base.append(intra_std_base_)
-        mean_feats_fc_angle_base_, std_feats_fc_angle_base_ = get_angle_feats_vec(d_base[ii], model.fc.weight[ii].cpu())
+        mean_feats_fc_angle_base_, std_feats_fc_angle_base_ = get_angle_feats_vec(d_base[ii], model.module.textual_classifier.weight[ii].cpu())
         mean_feats_fc_angle_base.append(mean_feats_fc_angle_base_)
         std_feats_fc_angle_base.append(std_feats_fc_angle_base_)
 
-        angle_base_feats_new_clfs_ = angle_btw_base_new(d_base[ii], model.fc.weight[
+        angle_base_feats_new_clfs_ = angle_btw_base_new(d_base[ii], model.module.textual_classifier.weight[
                                                                    start_class:start_class + args.way].cpu())
         angle_base_feats_new_clfs.append(angle_base_feats_new_clfs_)
 
-        featmean_fc_angle_ = F.linear(F.normalize(mean_base_,dim=0), F.normalize(model.fc.weight[ii].cpu(),dim=0)).clamp(-1, 1)
+        featmean_fc_angle_ = F.linear(F.normalize(mean_base_,dim=0), F.normalize(model.module.textual_classifier.weight[ii].cpu(),dim=0)).clamp(-1, 1)
         featmean_fc_angle_ = torch.acos(featmean_fc_angle_) * 180 / math.pi
         featmean_fc_angle_base.append(featmean_fc_angle_)
 
@@ -594,13 +598,13 @@ def inc_angle_exp(args, base_testloader, new_testloader, doubleaug, procD, clsD,
         intra_mean_inc.append(intra_mean_inc_)
         intra_std_inc.append(intra_std_inc_)
         mean_feats_fc_angle_inc_, std_feats_fc_angle_inc_ = get_angle_feats_vec(d_inc[ii],
-                                       model.module.fc.weight[start_class + ii].cpu())
+                                       model.module.textual_classifier.weight[start_class + ii].cpu())
         mean_feats_fc_angle_inc.append(mean_feats_fc_angle_inc_)
         std_feats_fc_angle_inc.append(std_feats_fc_angle_inc_)
-        angle_base_clfs_new_feats_ = angle_btw_base_new(d_inc[ii], model.module.fc.weight[:args.base_class].cpu())
+        angle_base_clfs_new_feats_ = angle_btw_base_new(d_inc[ii], model.module.textual_classifier.weight[:args.base_class].cpu())
         angle_base_clfs_new_feats.append(angle_base_clfs_new_feats_)
 
-        featmean_fc_angle_ = F.linear(F.normalize(mean_inc_,dim=0), F.normalize(model.module.fc.weight[start_class+ii].cpu(),dim=0)).clamp(-1,1)
+        featmean_fc_angle_ = F.linear(F.normalize(mean_inc_,dim=0), F.normalize(model.module.textual_classifier.weight[start_class+ii].cpu(),dim=0)).clamp(-1,1)
         featmean_fc_angle_ = torch.acos(featmean_fc_angle_) * 180 / math.pi
         featmean_fc_angle_inc.append(featmean_fc_angle_)
 
@@ -633,9 +637,9 @@ def inc_angle_exp(args, base_testloader, new_testloader, doubleaug, procD, clsD,
     angle_base_feats_new_clf = torch.mean(angle_base_feats_new_clfs)
     angle_base_clfs_new_feat = torch.mean(angle_base_clfs_new_feats)
 
-    base_inc_fc_angle = angle_btw_base_new(model.module.fc.weight[:args.base_class].cpu(),
-                       model.module.fc.weight[ start_class : start_class + args.way].cpu())
-    inc_inter_fc_angle = get_inter_angle(model.module.fc.weight[start_class : start_class + args.way].cpu())
+    base_inc_fc_angle = angle_btw_base_new(model.module.textual_classifier.weight[:args.base_class].cpu(),
+                       model.module.textual_classifier.weight[ start_class : start_class + args.way].cpu())
+    inc_inter_fc_angle = get_inter_angle(model.module.textual_classifier.weight[start_class : start_class + args.way].cpu())
 
     angle_featmean_fc_base = torch.mean(featmean_fc_angle_base, dim=0)
     angle_featmean_fc_inc = torch.mean(featmean_fc_angle_inc, dim=0)

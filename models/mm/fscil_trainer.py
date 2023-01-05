@@ -16,6 +16,7 @@ from SupConLoss import SupConLoss
 #from src.datasets.common import get_dataloader, maybe_dictionarize
 #from src.datasets.registry import get_dataset
 from src.utils import *
+from english_words import english_words_lower_set
 
 class FSCILTrainer(object, metaclass=abc.ABCMeta):
     def __init__(self):
@@ -85,6 +86,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             args.shotpercls = False
         else:
             args.shotpercls = True
+
 
         # Setting save path
         # mode = args.base_mode + '-' + args.new_mode
@@ -202,6 +204,10 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         text_clf_weight_fn = 'head_%s_%s.pt' % (args.dataset, args.model_type)
         args.text_clf_weight_fn = os.path.join(args.zsl_save_path, text_clf_weight_fn)
+
+        if args.use_randomtext:
+            randomtext_embed_fn = 'rdtxt_%s_%s.pt' % (args.dataset, args.model_type)
+            args.randomtext_embed_fn = os.path.join(args.zsl_save_path, randomtext_embed_fn)
 
 
         # Setting dictionaries
@@ -407,7 +413,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             data_time = time.time() - start_time
             """
 
-            logits = model(inputs, sess=procD['session'])
+            logits = model(inputs, sess=procD['session'], train=True)
             loss = loss_fn(logits, labels)
 
             params = [p for p in model.module.parameters() if p.requires_grad]
@@ -525,7 +531,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             args.dataset_label2txt = {v: k for k, v in tmp_trainset.class_to_idx.items()}
         elif args.dataset == 'mini_imagenet':
             tmp_trainset = args.Dataset.MiniImageNet(args, train=True, shotpercls=args.shotpercls, base_sess=True,
-                                                 root=args.dataroot, doubleaug=args.base_doubleaug,
+                                                     root=args.dataroot, doubleaug=args.base_doubleaug,
                                                      index=np.array(args.task_class_order))
             mini_dic_loc = 'dataloader/miniimagenet/imagenet_label_textdic'
             with open(mini_dic_loc, 'rb') as f:
@@ -535,8 +541,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 args.dataset_label2txt[i] = mini_dic[tmp_trainset.wnids[i]]
         elif args.dataset == 'cub200':
             tmp_trainset = args.Dataset.CUB200(args, train=True, shotpercls=args.shotpercls, base_sess=True,
-                                           root=args.dataroot, doubleaug=args.base_doubleaug,
-                                           index=np.array(args.task_class_order))
+                                               root=args.dataroot, doubleaug=args.base_doubleaug,
+                                               index=np.array(args.task_class_order))
             mini_dic = {}
             for key, value in tmp_trainset.id2image.items():
                 _str = value.split('/')[0]
@@ -548,15 +554,27 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             raise NotImplementedError
 
 
-
+        print(f'Classification head for {args.model_type} on {args.dataset} exists at {args.text_clf_weight_fn}')
         if os.path.exists(args.text_clf_weight_fn):
-            print(f'Classification head for {args.model_type} on {args.dataset} exists at {args.text_clf_weight_fn}')
             print('Loading %s'%(args.text_clf_weight_fn))
             textual_clf_weights = torch.load(args.text_clf_weight_fn)
         else:
+            print('Creating head for %s on %s at %s' %(args.model_type, args.dataset, args.text_clf_weight_fn))
             textual_clf_weights = get_zeroshot_weights(args)
             torch.save(textual_clf_weights, args.text_clf_weight_fn)
             #textual_clf_weights.save(args.text_clf_head_path)
+
+        if args.use_randomtext:
+            if os.path.exists(args.randomtext_embed_fn):
+                print(f'Random text embedding for {args.model_type} on {args.dataset} exists at {args.randomtext_embed_fn}')
+                print('Loading %s'%(args.randomtext_embed_fn))
+                randomtext_embed = torch.load(args.randomtext_embed_fn)
+            else:
+                print('Creating randomtext embeddings for %s on %s at %s' %(args.model_type, args.dataset, args.randomtext_embed_fn))
+                randomtext_embed = get_zeroshot_weights(args, randtxt=True)
+                torch.save(randomtext_embed, args.randomtext_embed_fn)
+            args.randomtext_embed = randomtext_embed
+
         model = MYNET(args, fw_mode=args.fw_mode, textual_clf_weights=textual_clf_weights)
 
         #if args.load_dir is not None:
@@ -688,7 +706,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     #tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
                     #                         epoch, supcon_criterion)
                     tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
-                                                epoch, loss_fn, supcon_criterion)
+                                             epoch, loss_fn, supcon_criterion)
 
                     # test model with all seen class
                     tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
@@ -740,9 +758,9 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                             base_angle_exp(args, testloader, False, procD, clsD, model)
                         print('sess 0 epoc_base 0')
                         print(init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
-                        init_angle_feat_fc_std, init_angle_featmean_fc )
+                              init_angle_feat_fc_std, init_angle_featmean_fc )
                         print(te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std, te_init_angle_feat_fc, \
-                        te_init_angle_feat_fc_std, te_init_angle_featmean_fc)
+                              te_init_angle_feat_fc_std, te_init_angle_featmean_fc)
 
                     tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
                     procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
@@ -778,9 +796,9 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                         base_angle_exp(args, testloader, False, procD, clsD, model)
                     print('sess 0 after train')
                     print(afterbase_inter_angles, afterbase_intra_angle_mean, afterbase_intra_angle_std, afterbase_angle_feat_fc, \
-                    afterbase_angle_feat_fc_std, afterbase_angle_featmean_fc)
+                          afterbase_angle_feat_fc_std, afterbase_angle_featmean_fc)
                     print(te_afterbase_inter_angles, te_afterbase_intra_angle_mean, te_afterbase_intra_angle_std, \
-                    te_afterbase_angle_feat_fc, te_afterbase_angle_feat_fc_std, te_afterbase_angle_featmean_fc)
+                          te_afterbase_angle_feat_fc, te_afterbase_angle_feat_fc_std, te_afterbase_angle_featmean_fc)
                 # fig, (ax1,ax2,ax3) = plt.subplots(1,3)
                 # ax1.plot(range(args.epochs_base), angles)
                 # ax2.plot(range(args.epochs_base), tas)

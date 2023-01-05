@@ -142,8 +142,6 @@ def get_command_line_parser():
     parser.add_argument('--use_custom_coslr', action='store_true')
 
 
-
-
     parser.add_argument("--load",type=lambda x: x.split(","),default=None,
         help="Optionally load _classifiers_, e.g. a zero shot classifier or probe or ensemble both.")
     parser.add_argument("--eval-every-epoch", action="store_true", default=False)
@@ -155,6 +153,9 @@ def get_command_line_parser():
     parser.add_argument("--cache-dir", type=str, default=None,
                         help="File path for fine-tune model. !=None is second phase loading. "
                              "this results loading both finetuned model and dicts saved right after ftr")
+
+    parser.add_argument('--use_randomtext', action='store_true')
+    parser.add_argument('--num_randomtext', type=int, default=100, help='if 0: random. otherwise set seed.')
 
     return parser
 

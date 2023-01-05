@@ -20,6 +20,7 @@ from clip.clip import tokenize
 from src.datasets.templates import get_templates
 from src.datasets.registry import get_dataset
 from src.modeling import ClassificationHead, ImageEncoder
+from english_words import english_words_lower_set
 
 
 
@@ -35,6 +36,7 @@ class MYNET(nn.Module):
         self.fw_mode = fw_mode
         self.base_class = args.base_class
         self.way = args.way
+        self.num_classes = args.num_classes
         self.use_head = args.use_head
         self.use_encmlp = args.use_encmlp
         if args.use_head:
@@ -43,6 +45,7 @@ class MYNET(nn.Module):
         if args.use_encmlp:
             self.encmlp_dim = args.encmlp_dim
             self.encmlp_layers = args.encmlp_layers
+        self.use_randomtext = args.use_randomtext
 
         self.clip_img_encoder = CLIP_Model(args, keep_lang=False)
         #textual_classifier = get_classification_head(args, args.train_dataset)
@@ -53,7 +56,7 @@ class MYNET(nn.Module):
 
         if args.model_type == 'ViT-L_14':
             self.num_features = 768
-        elif args.model_type == 'ViT-B_14':
+        elif args.model_type == 'ViT-B_16':
             self.num_features = 768
         elif args.model_type == 'RN50':
             self.num_features = 2048
@@ -64,12 +67,18 @@ class MYNET(nn.Module):
 
 
         self.textual_clf_weights = self.textual_clf_weights[args.task_class_order]
-        textual_clf_head = ClassificationHead(normalize=True, weights=self.textual_clf_weights)
-        self.textual_classifier = textual_clf_head
 
+        if not self.use_randomtext:
+            textual_clf_head = ClassificationHead(normalize=True, weights=self.textual_clf_weights)
+            self.textual_classifier = textual_clf_head
+        else:
+            temp_randomtext_embed = args.randomtext_embed
+            rdtxt_idx = torch.randperm(len(temp_randomtext_embed))[:args.num_randomtext]
+            #args.randomtext = [args.dic_randomtextp[i] for i in rdtxt_idx]
+            self.randomtext_embed = temp_randomtext_embed[rdtxt_idx]
 
-
-
+            temp_textual_clf_head = torch.cat([self.textual_clf_weights, self.randomtext_embed])
+            self.textual_classifier = ClassificationHead(normalize=True, weights=temp_textual_clf_head)
 
         """
         if not args.use_encmlp:
@@ -144,11 +153,17 @@ class MYNET(nn.Module):
         x = F.normalize(self.head(x), dim=1)
         return x
 
-    def forward(self, inputs, sess=None):
+    def forward(self, inputs, sess=None, train=False):
         features = self.clip_img_encoder(inputs)
         outputs = self.textual_classifier(features)
         n_cls = self.base_class if sess == 0 else self.base_class + self.way * (sess)
-        outputs = outputs[:, :n_cls]
+        if train==False:
+            outputs = outputs[:, :n_cls]
+        else:
+            if not self.use_randomtext:
+                outputs = outputs[:, :n_cls]
+            else:
+                outputs = torch.cat([outputs[:,:n_cls], outputs[:, self.num_classes:]], dim=1)
         return outputs
     """
     def forward(self, input, label=None, sess=None, doenc=True):
@@ -306,20 +321,28 @@ class ImageClassifier(torch.nn.Module):
         return torch_load(filename)
 
 
-def build_zeroshot_weights(model, args, template, device):
-    dataset_name = args.dataset
-    template = get_templates(dataset_name)
-
+def build_zeroshot_weights(model, args, template, device, randtxt):
     logit_scale = model.logit_scale
+
     model.eval()
     model.to(device)
+    if randtxt == False:
+        num_words = args.num_classes
+    else:
+        english_dict = list(english_words_lower_set)
+        num_words = len(english_dict)
+
 
     print('Building classification head.')
     with torch.no_grad():
         zeroshot_weights = []
-        for i in range(args.num_classes):
+        #for i in range(args.num_classes):
+        for i in range(num_words):
         #for classname in tqdm(dataset.classnames):
-            classname = args.dataset_label2txt[i]
+            if randtxt == False:
+                classname = args.dataset_label2txt[i]
+            else:
+                classname = english_dict[i]
             texts = []
             for t in template:
                 texts.append(t(classname))
@@ -343,13 +366,13 @@ def build_zeroshot_weights(model, args, template, device):
 
 
 
-def get_zeroshot_weights(args):
+def get_zeroshot_weights(args, randtxt=False):
 
     print(f'Did not find classification head for {args.model_type} on {args.dataset} at {args.text_clf_weight_fn}, building one from scratch.')
 
     model = CLIP_Model(args, keep_lang=True).model
     template = get_templates(args.dataset)
-    zeroshot_weights = build_zeroshot_weights(model, args, template, args.device)
+    zeroshot_weights = build_zeroshot_weights(model, args, template, args.device, randtxt)
     return zeroshot_weights
 
 
