@@ -99,6 +99,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         idg = 'T' if args.inc_doubleaug else 'F'
 
         rcnm = 'T' if args.rpclf_normmean else 'F'
+        co = 'T' if args.use_custom_coslr else 'F'
 
         if args.schedule == 'Milestone':
             mile_stone = str(args.milestones).replace(" ", "").replace(',', '_')[1:-1]
@@ -147,6 +148,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         # CRN: CIFAR_RESNET
         # EM: encmlp
         # G: gauss, bt: tukey_beta, ns: num_sampled
+        # CO: custom optimizer
 
         str_loss = '-'
         if args.use_celoss:
@@ -172,13 +174,13 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         if args.use_encmlp:
             str_loss += 'EM%d_D%d-' % (args.encmlp_layers, args.encmlp_dim)
 
-        hyper_name_list = 'Epob_%d-Epon_%d-Lrb_%.4f-Lrn_%.4f-%s-%s-Gam_%.2f-Dec_%.5f-wd_%.1f-ls_%.1f-Bs_%d-Mom_%.2f' \
-                          'bsc_%d-way_%d-shot_%d-bfzb_%s-ifzb_%s-bdg_%s-idg_%s-rcnm_%s-bdm_%s' \
+        hyper_name_list = 'Model_%s-Epob_%d-Epon_%d-Lrb_%.4f-Lrn_%.4f-%s-%s-Gam_%.2f-Dec_%.5f-wd_%.1f-ls_%.1f-Bs_%d-Mom_%.2f' \
+                          'bsc_%d-way_%d-shot_%d-bfzb_%s-ifzb_%s-bdg_%s-idg_%s-rcnm_%s-bdm_%s-co_%s' \
                           '-sd_%d' % (
-                              args.epochs_base, args.epochs_new, args.lr_base, args.lr_new, schedule, schedule_new, \
+                              args.model_type, args.epochs_base, args.epochs_new, args.lr_base, args.lr_new, schedule, schedule_new, \
                               args.gamma, args.decay, args.wd, args.ls,
                               args.batch_size_base, args.momentum, args.base_class, args.way, args.shot,
-                              bfzb, ifzb, bdg, idg, rcnm, args.base_dataloader_mode, args.seed)
+                              bfzb, ifzb, bdg, idg, rcnm, args.base_dataloader_mode, co, args.seed)
         hyper_name_list += str_loss
 
         # if args.warm:
@@ -661,6 +663,13 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std, te_init_angle_feat_fc, \
                     te_init_angle_feat_fc_std, te_init_angle_featmean_fc = \
                         base_angle_exp(args, testloader, False, procD, clsD, model)
+                    print('sess 0 bef train')
+                    print(init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
+                          init_angle_feat_fc_std, init_angle_featmean_fc)
+                    print(te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std,
+                          te_init_angle_feat_fc, \
+                          te_init_angle_feat_fc_std, te_init_angle_featmean_fc)
+                    print('text classifiers inter angle: %d'%(get_inter_angle(model.module.textual_classifier.weight)))
 
                 print('new classes for this session:\n', np.unique(train_set.targets))
                 model, optimizer, scheduler = self.get_optimizer_base(args, model, num_batches)
@@ -721,6 +730,20 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
                 if args.epochs_base == 0:
                     epoch = -1
+                    if args.angle_exp:
+                        init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
+                        init_angle_feat_fc_std, init_angle_featmean_fc = \
+                            base_angle_exp(args, trainloader, args.base_doubleaug, procD, clsD, model,
+                                           testloader.dataset.transform)
+                        te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std, te_init_angle_feat_fc, \
+                        te_init_angle_feat_fc_std, te_init_angle_featmean_fc = \
+                            base_angle_exp(args, testloader, False, procD, clsD, model)
+                        print('sess 0 epoc_base 0')
+                        print(init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
+                        init_angle_feat_fc_std, init_angle_featmean_fc )
+                        print(te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std, te_init_angle_feat_fc, \
+                        te_init_angle_feat_fc_std, te_init_angle_featmean_fc)
+
                     tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
                     procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
                     procD['trlog']['test_loss'].append(tsl)
@@ -753,7 +776,11 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     te_afterbase_inter_angles, te_afterbase_intra_angle_mean, te_afterbase_intra_angle_std, \
                     te_afterbase_angle_feat_fc, te_afterbase_angle_feat_fc_std, te_afterbase_angle_featmean_fc = \
                         base_angle_exp(args, testloader, False, procD, clsD, model)
-
+                    print('sess 0 after train')
+                    print(afterbase_inter_angles, afterbase_intra_angle_mean, afterbase_intra_angle_std, afterbase_angle_feat_fc, \
+                    afterbase_angle_feat_fc_std, afterbase_angle_featmean_fc)
+                    print(te_afterbase_inter_angles, te_afterbase_intra_angle_mean, te_afterbase_intra_angle_std, \
+                    te_afterbase_angle_feat_fc, te_afterbase_angle_feat_fc_std, te_afterbase_angle_featmean_fc)
                 # fig, (ax1,ax2,ax3) = plt.subplots(1,3)
                 # ax1.plot(range(args.epochs_base), angles)
                 # ax2.plot(range(args.epochs_base), tas)
@@ -854,30 +881,32 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     # draw_tsne(data_new_, label_new_, n_components, perplexity, palette2, new_tsne_idx, 'new test')
                     draw_tsne(data_new_, lll, n_components, perplexity, palette2, iii, 'new test')
 
+
                 # if session == 1:
                 if args.angle_exp:
-                    inter_angles_base, angle_intra_mean_base, angle_intra_std_base, angle_feat_fc_base, angle_feat_fc_base_std, \
-                    inter_angles_inc, angle_intra_mean_inc, angle_intra_std_inc, angle_feat_fc_inc, angle_feat_fc_inc_std, \
-                    angle_base_feats_new_clf, angle_base_clfs_new_feat, base_inc_fc_angle, inc_inter_fc_angle, \
-                    angle_featmean_fc_base, angle_featmean_fc_inc \
-                        = inc_angle_exp(args, base_testloader, new_testloader, args.base_doubleaug, procD, clsD, model)
+                    if session == args.sessions-1:
+                        inter_angles_base, angle_intra_mean_base, angle_intra_std_base, angle_feat_fc_base, angle_feat_fc_base_std, \
+                        inter_angles_inc, angle_intra_mean_inc, angle_intra_std_inc, angle_feat_fc_inc, angle_feat_fc_inc_std, \
+                        angle_base_feats_new_clf, angle_base_clfs_new_feat, base_inc_fc_angle, inc_inter_fc_angle, \
+                        angle_featmean_fc_base, angle_featmean_fc_inc \
+                            = inc_angle_exp(args, base_testloader, new_testloader, args.base_doubleaug, procD, clsD, model)
 
-                    l_inter_angles_base.append(inter_angles_base)
-                    l_angle_intra_mean_base.append(angle_intra_mean_base)
-                    l_angle_intra_std_base.append(angle_intra_std_base)
-                    l_angle_feat_fc_base.append(angle_feat_fc_base)
-                    l_angle_feat_fc_base_std.append(angle_feat_fc_base_std)
-                    l_inter_angles_inc.append(inter_angles_inc)
-                    l_angle_intra_mean_inc.append(angle_intra_mean_inc)
-                    l_angle_intra_std_inc.append(angle_intra_std_inc)
-                    l_angle_feat_fc_inc.append(angle_feat_fc_inc)
-                    l_angle_feat_fc_inc_std.append(angle_feat_fc_inc_std)
-                    l_angle_base_feats_new_clf.append(angle_base_feats_new_clf)
-                    l_angle_base_clfs_new_feat.append(angle_base_clfs_new_feat)
-                    l_base_inc_fc_angle.append(base_inc_fc_angle)
-                    l_inc_inter_fc_angle.append(inc_inter_fc_angle)
-                    l_angle_featmean_fc_base.append(angle_featmean_fc_base)
-                    l_angle_featmean_fc_inc.append(angle_featmean_fc_inc)
+                        l_inter_angles_base.append(inter_angles_base)
+                        l_angle_intra_mean_base.append(angle_intra_mean_base)
+                        l_angle_intra_std_base.append(angle_intra_std_base)
+                        l_angle_feat_fc_base.append(angle_feat_fc_base)
+                        l_angle_feat_fc_base_std.append(angle_feat_fc_base_std)
+                        l_inter_angles_inc.append(inter_angles_inc)
+                        l_angle_intra_mean_inc.append(angle_intra_mean_inc)
+                        l_angle_intra_std_inc.append(angle_intra_std_inc)
+                        l_angle_feat_fc_inc.append(angle_feat_fc_inc)
+                        l_angle_feat_fc_inc_std.append(angle_feat_fc_inc_std)
+                        l_angle_base_feats_new_clf.append(angle_base_feats_new_clf)
+                        l_angle_base_clfs_new_feat.append(angle_base_clfs_new_feat)
+                        l_base_inc_fc_angle.append(base_inc_fc_angle)
+                        l_inc_inter_fc_angle.append(inc_inter_fc_angle)
+                        l_angle_featmean_fc_base.append(angle_featmean_fc_base)
+                        l_angle_featmean_fc_inc.append(angle_featmean_fc_inc)
 
                     # print(inter_angles_base, angle_intra_std_base, angle_feat_fc_base, inter_angles_inc, angle_intra_std_inc, \
                     # angle_feat_fc_inc, angle_base_feats_new_clf, angle_base_clfs_new_feat, base_inc_fc_angle, inc_inter_fc_angle)

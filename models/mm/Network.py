@@ -53,6 +53,10 @@ class MYNET(nn.Module):
 
         if args.model_type == 'ViT-L_14':
             self.num_features = 768
+        elif args.model_type == 'ViT-B_14':
+            self.num_features = 768
+        elif args.model_type == 'RN50':
+            self.num_features = 2048
         else:
             raise NotImplementedError
 

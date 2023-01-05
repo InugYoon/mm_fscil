@@ -17,11 +17,11 @@ def get_command_line_parser():
     #parser.add_argument("--model_type",type=str,default='ViT-L/14',
     #    help="The type of model (e.g. RN50, ViT-B/32).")
     parser.add_argument("--model_type", type=str, default='ViT-L_14',
-                        help="The type of model (e.g. RN50, ViT-B_32, ViT-L_14_336px).")
+                        help="The type of model (e.g. RN50, ViT-B_16, ViT-B_32, ViT-L_14_336px).")
 
     # about pre-training
     #parser.add_argument('-epochs_base', type=int, default=1000) # original version
-    parser.add_argument('--epochs_base', type=int, default=1)  # original version
+    parser.add_argument('--epochs_base', type=int, default=0)  # original version
     parser.add_argument('--epochs_new', type=int, default=1)
     parser.add_argument('--epochs_base_clf', type=int, default=1)
     parser.add_argument('--lr_base', type=float, default=1e-5)
