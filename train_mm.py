@@ -157,6 +157,8 @@ def get_command_line_parser():
     parser.add_argument('--use_randomtext', action='store_true')
     parser.add_argument('--num_randomtext', type=int, default=100, help='if 0: random. otherwise set seed.')
 
+    parser.add_argument('--use_flyp_ft', action='store_true')
+
     return parser
 
 

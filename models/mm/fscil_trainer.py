@@ -10,13 +10,16 @@ import torch.backends.cudnn as cudnn
 from utils_s import *
 from dataloader.data_utils_s import *
 from tensorboardX import SummaryWriter
-from .Network import MYNET, ImageClassifier, ImageEncoder, ClassificationHead, get_zeroshot_weights
+from .Network import *
 from tqdm import tqdm
 from SupConLoss import SupConLoss
 #from src.datasets.common import get_dataloader, maybe_dictionarize
 #from src.datasets.registry import get_dataset
 from src.utils import *
 from english_words import english_words_lower_set
+from clip.loss import ClipLoss
+from src.datasets.templates import get_templates
+
 
 class FSCILTrainer(object, metaclass=abc.ABCMeta):
     def __init__(self):
@@ -102,6 +105,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         rcnm = 'T' if args.rpclf_normmean else 'F'
         co = 'T' if args.use_custom_coslr else 'F'
+        rdtxt = 'T%d'%(args.num_randomtext) if args.use_randomtext else 'F'
+        ft_type = 'flyp' if args.use_flyp_ft else 'ce'
 
         if args.schedule == 'Milestone':
             mile_stone = str(args.milestones).replace(" ", "").replace(',', '_')[1:-1]
@@ -177,18 +182,19 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             str_loss += 'EM%d_D%d-' % (args.encmlp_layers, args.encmlp_dim)
 
         hyper_name_list = 'Model_%s-Epob_%d-Epon_%d-Lrb_%.4f-Lrn_%.4f-%s-%s-Gam_%.2f-Dec_%.5f-wd_%.1f-ls_%.1f-Bs_%d-Mom_%.2f' \
-                          'bsc_%d-way_%d-shot_%d-bfzb_%s-ifzb_%s-bdg_%s-idg_%s-rcnm_%s-bdm_%s-co_%s' \
-                          '-sd_%d' % (
+                          'bsc_%d-way_%d-shot_%d-bfzb_%s-ifzb_%s-bdg_%s-idg_%s-rcnm_%s-bdm_%s-co_%s-rdtxt_%s' \
+                          '-ft_type_%s-sd_%d' % (
                               args.model_type, args.epochs_base, args.epochs_new, args.lr_base, args.lr_new, schedule, schedule_new, \
                               args.gamma, args.decay, args.wd, args.ls,
                               args.batch_size_base, args.momentum, args.base_class, args.way, args.shot,
-                              bfzb, ifzb, bdg, idg, rcnm, args.base_dataloader_mode, co, args.seed)
+                              bfzb, ifzb, bdg, idg, rcnm, args.base_dataloader_mode, co, rdtxt, ft_type, args.seed)
+
         hyper_name_list += str_loss
 
         # if args.warm:
         #    hyper_name_list += '-warm'
 
-        save_path = '%s/' % args.dataset
+        save_path = 'tete_%s/' % args.dataset
         save_path = save_path + '%s/' % args.project
         #save_path = save_path + '%s-st_%d/' % (mode, args.start_session)
         # save_path += 'mlp-ftenc'
@@ -403,7 +409,6 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 train_label = train_label.repeat(2)
                 target_cls = clsD['class_maps'][0][train_label]
 
-
             inputs = data
             labels = target_cls
             """
@@ -412,9 +417,41 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             labels = batch['labels'].cuda()
             data_time = time.time() - start_time
             """
+            if not args.use_flyp_ft:
+                logits = model(inputs, sess=procD['session'], train=True)
+                loss = loss_fn(logits, labels)
+            else:
+                batch_words = [args.dataset_label2txt[int(i)] for i in train_label] # -> prompt -> text encoder
+                template = get_templates(args.dataset)
+                tokentxts = [temptokenize(args, template, batch_words[i]) for i in range(len(batch_words))]
+                tokentxts = torch.stack(tokentxts, dim=0).detach()
+                #tokentxts = torch.stack(tokentxts, dim=0)
+                embed_imgs, embed_words, logit_scale2 =  model.module.clip_encoder.model(inputs, tokentxts)
+                loss = loss_fn(embed_imgs, embed_words, logit_scale2)
+                """
+                embed_words = lab_text_2weights(model.module.clip_encoder.model, args, template, args.device, batch_words)
+                embed_imgs = model.module.clip_encoder.model.encode_image(inputs)
+                loss = loss_fn(embed_imgs, embed_words, model.module.clip_encoder.model.logit_scale.exp())
+                """
+                # model.clip_encoder.logit_scale.exp()[0] is replacement of logit_scale2[0] from flyp git
+                # since lgit_scale2 is output of clip forward and it outputs self.logit_scale.exp()
+                # https://github.com/locuslab/FLYP/blob/main/clip/model.py
 
-            logits = model(inputs, sess=procD['session'], train=True)
-            loss = loss_fn(logits, labels)
+                # detach????
+
+                # just clyp_model.encode(img, text) instead of upper line
+                #textual_clf_weights = get_words_weights(args, words=batch_words)
+
+
+                # build_zeroshot_weights?
+                # SHould change name model.clip_image_encoder to clip_encoder
+                #model.textual_classifier[labels]
+                # Same.
+                # No not below. above. because not fixed text encoder.
+                # & inputs (batch of images)
+                # put into clip-loss_fn
+                # utilize model.encoder
+
 
             params = [p for p in model.module.parameters() if p.requires_grad]
             torch.nn.utils.clip_grad_norm_(params, 1.0)
@@ -427,24 +464,31 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     f"Loss: {loss.item():.6f}", flush=True
                 )
 
-
-            acc = count_acc(logits, labels)
             total_loss = loss
 
             if not args.use_custom_coslr:
                 lrc = scheduler.get_last_lr()[0]
-            tqdm_gen.set_description(
-                'Session 0, epo {}, total loss={:.4f} acc={:.4f}'.format(epoch, total_loss.item(), acc))
             tl.add(total_loss.item())
-            ta.add(acc)
 
             optimizer.zero_grad()
             # loss.backward()
             total_loss.backward()
             optimizer.step()
-            # self.step += 1
+
+            if not args.use_flyp_ft:
+                acc = count_acc(logits, labels)
+                tqdm_gen.set_description(
+                    'Session 0, epo {}, total loss={:.4f} acc={:.4f}'.format(epoch, total_loss.item(), acc))
+                ta.add(acc)
+            else:
+                tqdm_gen.set_description(
+                    'Session 0, epo {}, total loss={:.4f}'.format(epoch, total_loss.item()))
         tl = tl.item()
-        ta = ta.item()
+        if not args.use_flyp_ft:
+            ta = ta.item()
+            return tl, ta
+        else:
+            return tl
 
         # Saving model
         """
@@ -459,7 +503,6 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             return zs_path, ft_path
         """
 
-        return tl, ta
 
 
 
@@ -471,9 +514,11 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         epoch = procD['epoch']
         session = procD['session']
 
+        model = model.cuda()
         model.eval()
         vl = Averager()
         va = Averager()
+
         with torch.no_grad():
             tqdm_gen = tqdm(testloader)
             for i, batch in enumerate(tqdm_gen, 1):
@@ -549,18 +594,19 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 strs = _str.split('.')
                 mini_dic[int(strs[0])-1] = strs[1]
             args.dataset_label2txt = mini_dic
-
         else:
             raise NotImplementedError
 
-
+        zeroshot_clipmodel = CLIP_Model(args, keep_lang=True)
         print(f'Classification head for {args.model_type} on {args.dataset} exists at {args.text_clf_weight_fn}')
         if os.path.exists(args.text_clf_weight_fn):
             print('Loading %s'%(args.text_clf_weight_fn))
             textual_clf_weights = torch.load(args.text_clf_weight_fn)
         else:
             print('Creating head for %s on %s at %s' %(args.model_type, args.dataset, args.text_clf_weight_fn))
-            textual_clf_weights = get_zeroshot_weights(args)
+            #textual_clf_weights = get_zeroshot_weights(args)
+            _words = [args.dataset_label2txt[i] for i in range(args.num_classes)]
+            textual_clf_weights = get_words_weights(args, zeroshot_clipmodel.model, words=_words)
             torch.save(textual_clf_weights, args.text_clf_weight_fn)
             #textual_clf_weights.save(args.text_clf_head_path)
 
@@ -571,7 +617,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 randomtext_embed = torch.load(args.randomtext_embed_fn)
             else:
                 print('Creating randomtext embeddings for %s on %s at %s' %(args.model_type, args.dataset, args.randomtext_embed_fn))
-                randomtext_embed = get_zeroshot_weights(args, randtxt=True)
+                #randomtext_embed = get_zeroshot_weights(args, randtxt=True)
+                randomtext_embed = get_words_weights(args, zeroshot_clipmodel.model, words=list(english_words_lower_set))
                 torch.save(randomtext_embed, args.randomtext_embed_fn)
             args.randomtext_embed = randomtext_embed
 
@@ -668,7 +715,16 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
             # Should erase this part. but how to use preprocess_fn on existing dataloader? train & test.
             num_batches = len(trainloader)
-            loss_fn = torch.nn.CrossEntropyLoss()
+
+            if not args.use_flyp_ft:
+                loss_fn = torch.nn.CrossEntropyLoss()
+            else:
+                loss_fn = ClipLoss(local_loss=False,
+                                   gather_with_grad=False,
+                                   cache_labels=True,
+                                   rank=0,
+                                   world_size=1,
+                                   use_horovod=False)
 
 
 
@@ -705,39 +761,33 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
                     #tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
                     #                         epoch, supcon_criterion)
-                    tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                    if not args.use_flyp_ft:
+                        tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
                                              epoch, loss_fn, supcon_criterion)
+                        procD['trlog']['train_loss'].append(tl)
+                        procD['trlog']['train_acc'].append(ta)
+                        result_list.append(
+                            'epoch:%03d,training_loss:%.5f,training_acc:%.5f' % (epoch, tl, ta))
+                        writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
 
+                    else:
+                        tl = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                                                 epoch, loss_fn, supcon_criterion)
+                        procD['trlog']['train_loss'].append(tl)
+                        result_list.append(
+                            'epoch:%03d,training_loss:%.5f' % (epoch, tl))
+                        writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
+
+                    """
                     # test model with all seen class
                     tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
-                    # tsl, tsa = self.test2(args, model, procD, clsD, trainloader, testloader)  ####
-
-                    # save better model
-                    if (tsa * 100) >= procD['trlog']['max_acc'][session]:
-                        procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
-                        procD['trlog']['max_acc_epoch'] = epoch
-                        save_model_dir = os.path.join(args.ft_save_path, 'session' + str(session) + '_max_acc.pth')
-                        torch.save(dict(params=model.state_dict()), save_model_dir)
-                        #torch.save(optimizer.state_dict(), os.path.join(args.ft_save_path, 'optimizer_best.pth'))
-                        best_model_dict = deepcopy(model.state_dict())
-                        print('********A better model is found!!**********')
-                        print('Saving model to :%s' % save_model_dir)
-                    print('best epoch {}, best test acc={:.3f}'.format(procD['trlog']['max_acc_epoch'],
-                                                                       procD['trlog']['max_acc'][session]))
-
-                    procD['trlog']['train_loss'].append(tl)
-                    procD['trlog']['train_acc'].append(ta)
                     procD['trlog']['test_loss'].append(tsl)
                     procD['trlog']['test_acc'].append(tsa)
                     result_list.append(
-                        'epoch:%03d,training_loss:%.5f,training_acc:%.5f,test_loss:%.5f,test_acc:%.5f' % (
-                            epoch, tl, ta, tsl, tsa))
-                    print('This epoch takes %d seconds' % (time.time() - start_time),
-                          '\nstill need around %.2f mins to finish this session' % (
-                                  (time.time() - start_time) * (args.epochs_base - epoch) / 60))
-                    writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
+                        'epoch:%03d,test_loss:%.5f,test_acc:%.5f' % (
+                            epoch, tsl, tsa))
                     writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa, epoch)
-                    writer.add_scalar('Session {0} - Learning rate/train'.format(session), epoch)
+                    """
                     #scheduler.step()
 
                     if epoch == args.epochs_base-1:
@@ -745,6 +795,25 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                                                       + '_epo' + str(epoch) + '_acc.pth')
                         torch.save(dict(params=model.state_dict()), save_model_dir)
                         save_obj(args.ft_save_path, procD, clsD, bookD)
+
+                if args.use_flyp_ft:
+                    _words = [args.dataset_label2txt[i] for i in range(args.num_classes)]
+                    ft_textual_clf_weights = get_words_weights(args, model.module.clip_encoder.model,
+                                                            words=_words)
+                    ft_textual_clf_weights = ft_textual_clf_weights[args.task_class_order].cuda().detach()
+                    #model.module.textual_classifier.load_weight(ft_textual_clf_weights)
+                    model.module.update_text_clf(ft_textual_clf_weights)
+
+                # test model with all seen class
+                tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
+                # tsl, tsa = self.test2(args, model, procD, clsD, trainloader, testloader)  ####
+                procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
+                procD['trlog']['test_loss'].append(tsl)
+                procD['trlog']['test_acc'].append(tsa)
+                result_list.append(
+                    'test_loss:%.5f,test_acc:%.5f' % (tsl, tsa))
+                writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa)
+
 
                 if args.epochs_base == 0:
                     epoch = -1
