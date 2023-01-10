@@ -48,7 +48,7 @@ class MYNET(nn.Module):
         self.use_randomtext = args.use_randomtext
 
 
-        if not args.use_flyp_ft:
+        if not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2:
             self.clip_encoder = CLIP_Model(args, keep_lang=False)
         else:
             self.clip_encoder = CLIP_Model(args, keep_lang=True)
@@ -274,17 +274,21 @@ class ImageClassifier(torch.nn.Module):
 
 
 
-def word2textembed(word, args, model, template, device):
+def word2textembed(word, args, model, template, device, v2=False):
     texts = []
     for t in template:
         texts.append(t(word))
     texts = tokenize(texts).to(device)  # tokenize   #prompts x sentence -> #prompts x 77 (prompt embedding dimension)
     embeddings = model.encode_text(texts)  # embed with text encoder  #prompts x prompt_embed_dim -> #prompts x embed_dim
-    embeddings /= embeddings.norm(dim=-1, keepdim=True)
-
-    embeddings = embeddings.mean(dim=0, keepdim=True) #1 x embed_dim
-    embeddings /= embeddings.norm()
+    if not v2:
+        embeddings /= embeddings.norm(dim=-1, keepdim=True)
+        embeddings = embeddings.mean(dim=0, keepdim=True) #1 x embed_dim
+        embeddings /= embeddings.norm()
+    else:
+        embeddings = embeddings.mean(dim=0, keepdim=True)  # 1 x embed_dim
+        embeddings = F.normalize(embeddings, dim=1)
     return embeddings
+
 
 def temptokenize(args, template, word):
     texts = []
@@ -292,10 +296,15 @@ def temptokenize(args, template, word):
         texts.append(t(word))
     texts = tokenize(texts).cuda()  # tokenize   #prompts x sentence -> #prompts x 77 (prompt embedding dimension)
     #texts = texts.mean(dim=0) #1 x embed_dim
-    text = texts[0]
+    text = texts[0]      ################ Note that in this version only use first template.
+    # this is originated that temptokenize is just developed to test the whether flyp code works.
+    # Patch if needed
+    # Could be removed if lab_text_2weights_v2 works well with flyp_ft performance.
     return text
 
 def lab_text_2weights(model, args, template, device, words):
+    # origin from patch. I changed the function name but almost similar
+    # Biggest differ point from v2 is the train<>eval (with no_grad existence) and *=logit_scale.exp() existence
     logit_scale = model.logit_scale
 
     model.eval()
@@ -315,6 +324,31 @@ def lab_text_2weights(model, args, template, device, words):
         zeroshot_weights = torch.stack(zeroshot_weights, dim=0).to(device)
         zeroshot_weights *= logit_scale.exp()
     return zeroshot_weights
+
+def lab_text_2weights_v2(model, args, template, device, words):
+    # origin from patch. I changed the function name but almost similar
+    # Biggest differ point from v2 is the train<>eval (with no_grad existence) and *=logit_scale.exp() existence
+
+    logit_scale = model.logit_scale
+
+    model.train()
+    #model.to(device)
+    num_words = len(words)
+
+    print('Building classification head.')
+    zeroshot_weights = []
+    #for i in range(args.num_classes):
+    for i in range(num_words):
+    #for classname in tqdm(dataset.classnames):
+        classname = words[i]
+        embeddings = word2textembed(classname, args, model, template, device, v2=True).squeeze() # (1,ch_dim) -> (ch_dim)
+        zeroshot_weights.append(embeddings)
+
+    #zeroshot_weights = torch.stack(zeroshot_weights, dim=0).to(device)
+    zeroshot_weights = torch.stack(zeroshot_weights, dim=0)
+    return zeroshot_weights
+
+
 
 def get_words_weights(args, clip_model, words):
 
