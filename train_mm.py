@@ -148,8 +148,10 @@ def get_command_line_parser():
 
     parser.add_argument("--data-location",type=str,default=os.path.expanduser('~/data'),
         help="The root directory for the datasets.")
-    parser.add_argument("--load_ft_model",type=str,default=None,
+    parser.add_argument("--load_ft_dir",type=str,default=None,
         help="Directory for caching features and encoder")
+    parser.add_argument("--load_ft_model_name", type=str, default=None,
+                        help="Directory for caching features and encoder")
     parser.add_argument("--cache-dir", type=str, default=None,
                         help="File path for fine-tune model. !=None is second phase loading. "
                              "this results loading both finetuned model and dicts saved right after ftr")
@@ -159,6 +161,9 @@ def get_command_line_parser():
 
     parser.add_argument('--use_flyp_ft_v1', action='store_true')
     parser.add_argument('--use_flyp_ft_v2', action='store_true')
+
+    parser.add_argument('--use_flyp_ft_inc', action='store_true', help='defaultto v1 for faster')
+
 
     return parser
 

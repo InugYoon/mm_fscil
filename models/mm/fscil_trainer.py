@@ -29,7 +29,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
     def init_vars(self, args):
         # Setting arguments
         # if args.start_session == 0:
-        if args.load_ft_model == None:
+        if args.load_ft_dir == None:
             args.secondphase = False
         else:
             args.secondphase = True
@@ -199,7 +199,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         # if args.warm:
         #    hyper_name_list += '-warm'
 
-        save_path = 'tete_%s/' % args.dataset
+        save_path = '%s/' % args.dataset
         save_path = save_path + '%s/' % args.project
         #save_path = save_path + '%s-st_%d/' % (mode, args.start_session)
         # save_path += 'mlp-ftenc'
@@ -258,10 +258,10 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             bookD = book_val(args)
 
         else:
-            assert args.load_ft_model != None
+            assert args.load_ft_dir != None
 
             # load objs
-            obj_dir = os.path.join(args.load_ft_model, 'saved_dicts')
+            obj_dir = os.path.join(args.load_ft_dir, 'saved_dicts')
             with open(obj_dir, 'rb') as f:
                 dict_ = pickle.load(f)
                 procD = dict_['procD']
@@ -272,15 +272,15 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             if args.start_session > 0:
                 procD['trlog']['max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
                 procD['trlog']['new_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
-                procD['trlog']['new_all_max_acc'] = [0.0] * (args.sessions - args.start_session)
-                procD['trlog']['base_max_acc'] = [0.0] * (args.sessions - args.start_session)
+                procD['trlog']['new_all_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
+                procD['trlog']['base_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
                 procD['trlog']['prev_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
                 procD['trlog']['prev_new_clf_ratio'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
                 procD['trlog']['new_new_clf_ratio'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
             else:
                 procD['trlog']['new_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
-                procD['trlog']['new_all_max_acc'] = [0.0] * (args.sessions - args.start_session)
-                procD['trlog']['base_max_acc'] = [0.0] * (args.sessions - args.start_session)
+                procD['trlog']['new_all_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
+                procD['trlog']['base_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
                 procD['trlog']['prev_max_acc'][args.start_session:] = [0.0] * (args.sessions - args.start_session)
 
             tasks = bookD[0]['tasks']  # Note that bookD[i]['tasks'] is same for each i
@@ -334,7 +334,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
 
 
-    def get_optimizer_new(self, args, model):
+    def get_optimizer_new(self, args, model, num_batches):
         # assert self.args.angle_mode is not None
 
         if args.inc_freeze_backbone:
@@ -346,44 +346,11 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             for param in model.head.parameters():
                 param.requires_grad = False
 
-        # for param in self.model.module.fc.parameters():
-        #    param.requires_grad = False
-
-        # set_trainable_param(self.model.module.angle_w, [i for i in range(self.args.proc_book['session']+1)])
-
-        # optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.model.module.parameters()),
-        #                            self.args.lr_new, momentum=0.9, nesterov=True, weight_decay=self.args.decay)
-        # optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.model.module.parameters()),
-        #                            self.args.lr_new, momentum=0.9, dampening=0.9,weight_decay=0) #Last ver.
-
-        enc_param_list = list(kv[0] for kv in model.encoder.named_parameters())
-        enc_param_list = ['encoder.' + k for k in enc_param_list]
-
-        enc_params = list(filter(lambda kv: kv[0] in enc_param_list and kv[1].requires_grad,
-                                 model.named_parameters()))
-        else_params = list(filter(lambda kv: kv[0] not in enc_param_list and kv[1].requires_grad,
-                                  model.named_parameters()))
-
-        enc_params = [i[1] for i in enc_params]
-        else_params = [i[1] for i in else_params]
-
-        optimizer = torch.optim.SGD([{'params': enc_params, 'lr': args.lr_new_enc},
-                                     {'params': else_params, 'lr': args.lr_new}],
-                                    # momentum=0.9, dampening=0.9, weight_decay=self.args.decay)
-                                    momentum=0.9, dampening=0.9, weight_decay=0)
-
-        if args.schedule_new == 'Step':
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_new, gamma=args.gamma)
-        elif args.schedule_new == 'Milestone':
-            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones_new,
-                                                             gamma=args.gamma)
-        elif args.schedule_new == 'Cosine':
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_base)
+        params = [p for p in model.module.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(params, lr=args.lr_base, weight_decay=args.wd)
+        scheduler = cosine_lr(optimizer, args.lr_base, args.warmup_length, args.epochs_base * num_batches)
 
         return model, optimizer, scheduler
-
-
-
 
     def base_train(self, args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler, epoch,
                    loss_fn, supcon_criterion=None):
@@ -480,25 +447,86 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 tqdm_gen.set_description(
                     'Session 0, epo {}, total loss={:.4f}'.format(epoch, total_loss.item()))
         tl = tl.item()
-        if not not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2:
+        if not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2:
             ta = ta.item()
             return tl, ta
         else:
             return tl
 
-        # Saving model
-        """
-        image_encoder = model.module.image_encoder
-        if args.save is not None:
-            os.makedirs(args.save, exist_ok=True)
-            model_path = os.path.join(args.save, args.train_dataset, f'checkpoint_{epoch + 1}.pt')
-            image_encoder.save(model_path)
-        if args.save is not None:
-            zs_path = os.path.join(args.save, args.train_dataset, 'checkpoint_0.pt')
-            ft_path = os.path.join(args.save, args.train_dataset, f'checkpoint_{args.epochs}.pt')
-            return zs_path, ft_path
-        """
 
+    def new_train(self, args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler, epoch,
+                   loss_fn, supcon_criterion=None):
+
+        tl = Averager()
+        ta = Averager()
+        # self.model = self.model.train()
+        model.train()
+        num_batches = len(trainloader)
+
+        # standard classification for pretrain
+        tqdm_gen = tqdm(trainloader)
+        for i, batch in enumerate(tqdm_gen, 1):
+            step = i + epoch * num_batches
+            scheduler(step)
+            if args.inc_doubleaug is False:
+                data, train_label = [_.cuda() for _ in batch]
+                target_cls = clsD['class_maps'][procD['session']][train_label]
+            else:
+                # data = batch[0][0].cuda()
+                # train_label = batch[1].cuda()
+                data = torch.cat((batch[0][0], batch[0][1]), dim=0).cuda()
+                # train_label = batch[1].repeat(2).cuda()
+                train_label = batch[1].cuda()
+                train_label = train_label.repeat(2)
+                target_cls = clsD['class_maps'][procD['session']][train_label]
+
+            inputs = data
+            labels = target_cls
+
+            if not args.use_flyp_ft_inc:
+                logits = model(inputs, sess=procD['session'], train=True)
+                loss = loss_fn(logits, labels)
+            else:
+                torch.autograd.set_detect_anomaly(True)
+                batch_words = [args.dataset_label2txt[int(i)] for i in train_label] # -> prompt -> text encoder
+                template = get_templates(args.dataset)
+
+                tokentxts = [temptokenize(args, template, batch_words[i]) for i in range(len(batch_words))]
+                tokentxts = torch.stack(tokentxts, dim=0).detach()
+                #tokentxts = torch.stack(tokentxts, dim=0)
+                embed_imgs, embed_words, logit_scale2 =  model.module.clip_encoder.model(inputs, tokentxts)
+                #embed_words = lab_text_2weights_v2(model.module.clip_encoder.model, args, template, args.device, batch_words)
+                loss = loss_fn(embed_imgs, embed_words, logit_scale2)
+
+
+            params = [p for p in model.module.parameters() if p.requires_grad]
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+
+            total_loss = loss
+
+            if not args.use_custom_coslr:
+                lrc = scheduler.get_last_lr()[0]
+            tl.add(total_loss.item())
+
+            optimizer.zero_grad()
+            # loss.backward()
+            total_loss.backward()
+            optimizer.step()
+
+            if not args.use_flyp_ft_inc:
+                acc = count_acc(logits, labels)
+                tqdm_gen.set_description(
+                    'Session 0, epo {}, total loss={:.4f} acc={:.4f}'.format(epoch, total_loss.item(), acc))
+                ta.add(acc)
+            else:
+                tqdm_gen.set_description(
+                    'Session 0, epo {}, total loss={:.4f}'.format(epoch, total_loss.item()))
+        tl = tl.item()
+        if not args.use_flyp_ft_inc:
+            ta = ta.item()
+            return tl, ta
+        else:
+            return tl
 
 
     def test(self, args, model, procD, clsD, testloader):
@@ -516,7 +544,6 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 data, test_label = [_.cuda() for _ in batch]
                 #logits = get_logits(data, model)
                 logits = model(data, procD['session'])
-
 
                 if session == 0:
                     # logits_cls = logits[:, clsD['tasks'][0]]
@@ -613,13 +640,6 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         model = MYNET(args, fw_mode=args.fw_mode, textual_clf_weights=textual_clf_weights)
 
-        #if args.load_dir is not None:
-        if args.load_ft_model is not None:
-            print('Loading init parameters from: %s_%s' % (args.load_ft_model))
-            load_ft_model_weight = torch.load(args.load_ft_model)['params']
-            model.load_state_dict(load_ft_model_weight, strict=True)
-
-
         # model = MYNET(args, fw_mode=args.fw_mode)
         # model = SupConResNet(name=opt.model, head='linear')
         criterion = SupConLoss(temperature=args.supcontemp, supcon_angle=args.supcon_angle)
@@ -628,6 +648,16 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         model = model.cuda()
         criterion = criterion.cuda()
         cudnn.benchmark = True
+
+        #if args.load_dir is not None:
+        if args.load_ft_dir is not None:
+            print('Loading init parameters from: %s_%s' % (args.load_ft_dir,args.load_ft_model_name))
+            args.load_ft_model = os.path.join(args.load_ft_dir, args.load_ft_model_name)
+            load_ft_model_weight = torch.load(args.load_ft_model)['params']
+            model.load_state_dict(load_ft_model_weight, strict=True)
+
+
+
 
         supcon_criterion = SupConLoss(temperature=args.supcontemp, supcon_angle=args.supcon_angle)
         kdloss = KDLoss(args.s)
@@ -718,72 +748,74 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
 
             if session == 0:  # load base class train img label
-                if args.angle_exp:
-                    init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
-                    init_angle_feat_fc_std, init_angle_featmean_fc = \
-                        base_angle_exp(args, trainloader, args.base_doubleaug, procD, clsD, model,
-                                       testloader.dataset.transform)
-                    te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std, te_init_angle_feat_fc, \
-                    te_init_angle_feat_fc_std, te_init_angle_featmean_fc = \
-                        base_angle_exp(args, testloader, False, procD, clsD, model)
-                    print('sess 0 bef train')
-                    print(init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
-                          init_angle_feat_fc_std, init_angle_featmean_fc)
-                    print(te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std,
-                          te_init_angle_feat_fc, \
-                          te_init_angle_feat_fc_std, te_init_angle_featmean_fc)
-                    print('text classifiers inter angle: %d'%(get_inter_angle(model.module.textual_classifier.weight)))
-
-                print('new classes for this session:\n', np.unique(train_set.targets))
-                model, optimizer, scheduler = self.get_optimizer_base(args, model, num_batches)
-
-                angles = []
-                for epoch in range(args.epochs_base):
-                    procD['epoch'] += 1
-                    start_time = time.time()
-                    # train base sess
-
+                if not args.secondphase:
                     if args.angle_exp:
-                        angle = get_intra_avg_angle_from_loader(args, trainloader, args.base_doubleaug, procD, clsD,
-                                                                model)
-                        angles.append(angle)
+                        init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
+                        init_angle_feat_fc_std, init_angle_featmean_fc = \
+                            base_angle_exp(args, trainloader, args.base_doubleaug, procD, clsD, model,
+                                           testloader.dataset.transform)
+                        te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std, te_init_angle_feat_fc, \
+                        te_init_angle_feat_fc_std, te_init_angle_featmean_fc = \
+                            base_angle_exp(args, testloader, False, procD, clsD, model)
+                        print('sess 0 bef train')
+                        print(init_inter_angles, init_intra_angle_mean, init_intra_angle_std, init_angle_feat_fc, \
+                              init_angle_feat_fc_std, init_angle_featmean_fc)
+                        print(te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std,
+                              te_init_angle_feat_fc, \
+                              te_init_angle_feat_fc_std, te_init_angle_featmean_fc)
+                        print('text classifiers inter angle: %d'%(get_inter_angle(model.module.textual_classifier.weight)))
 
-                    #tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
-                    #                         epoch, supcon_criterion)
-                    if not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2:
-                        tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
-                                             epoch, loss_fn, supcon_criterion)
-                        procD['trlog']['train_loss'].append(tl)
-                        procD['trlog']['train_acc'].append(ta)
-                        result_list.append(
-                            'epoch:%03d,training_loss:%.5f,training_acc:%.5f' % (epoch, tl, ta))
-                        writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
+                    print('new classes for this session:\n', np.unique(train_set.targets))
+                    model, optimizer, scheduler = self.get_optimizer_base(args, model, num_batches)
 
-                    else:
-                        tl = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                    angles = []
+                    for epoch in range(args.epochs_base):
+                        procD['epoch'] += 1
+                        start_time = time.time()
+                        # train base sess
+
+                        if args.angle_exp:
+                            angle = get_intra_avg_angle_from_loader(args, trainloader, args.base_doubleaug, procD, clsD,
+                                                                    model)
+                            angles.append(angle)
+
+                        #tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                        #                         epoch, supcon_criterion)
+                        if not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2:
+                            tl, ta = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
                                                  epoch, loss_fn, supcon_criterion)
-                        procD['trlog']['train_loss'].append(tl)
+                            procD['trlog']['train_loss'].append(tl)
+                            procD['trlog']['train_acc'].append(ta)
+                            result_list.append(
+                                'epoch:%03d,training_loss:%.5f,training_acc:%.5f' % (epoch, tl, ta))
+                            writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
+
+                        else:
+                            tl = self.base_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                                                     epoch, loss_fn, supcon_criterion)
+                            procD['trlog']['train_loss'].append(tl)
+                            result_list.append(
+                                'epoch:%03d,training_loss:%.5f' % (epoch, tl))
+                            writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
+
+                        """
+                        # test model with all seen class
+                        tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
+                        procD['trlog']['test_loss'].append(tsl)
+                        procD['trlog']['test_acc'].append(tsa)
                         result_list.append(
-                            'epoch:%03d,training_loss:%.5f' % (epoch, tl))
-                        writer.add_scalar('Session {0} - Loss/train'.format(session), tl, epoch)
+                            'epoch:%03d,test_loss:%.5f,test_acc:%.5f' % (
+                                epoch, tsl, tsa))
+                        writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa, epoch)
+                        """
+                        #scheduler.step()
 
-                    """
-                    # test model with all seen class
-                    tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
-                    procD['trlog']['test_loss'].append(tsl)
-                    procD['trlog']['test_acc'].append(tsa)
-                    result_list.append(
-                        'epoch:%03d,test_loss:%.5f,test_acc:%.5f' % (
-                            epoch, tsl, tsa))
-                    writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa, epoch)
-                    """
-                    #scheduler.step()
-
-                    if epoch == args.epochs_base-1:
-                        save_model_dir = os.path.join(args.ft_save_path, 'session' + str(session) \
-                                                      + '_epo' + str(epoch) + '_acc.pth')
-                        torch.save(dict(params=model.state_dict()), save_model_dir)
-                        save_obj(args.ft_save_path, procD, clsD, bookD)
+                        if epoch == args.epochs_base-1:
+                            save_model_dir = os.path.join(args.ft_save_path, 'session' + str(session) \
+                                                          + '_epo' + str(epoch) + '_acc.pth')
+                            torch.save(dict(params=model.state_dict()), save_model_dir)
+                            save_obj(args.ft_save_path, procD, clsD, bookD)
+                            print('save path is %s'%(args.ft_save_path))
 
                 if args.use_flyp_ft_v1 or args.use_flyp_ft_v2:
                     _words = [args.dataset_label2txt[i] for i in range(args.num_classes)]
@@ -868,49 +900,25 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
             else:  # incremental learning sessions
                 print("training session: [%d]" % session)
-
-                """
-                model, optimizer, scheduler = self.get_optimizer_new(args, model)
+                num_batches = len(trainloader)
+                model, optimizer, scheduler = self.get_optimizer_new(args, model, num_batches)
                 transform_ = trainloader.dataset.transform
                 trainloader.dataset.transform = testloader.dataset.transform
-                model = self.replace_clf(args, model, procD, clsD, trainloader, testloader.dataset.transform,
-                                         args.rbfc_opt2)
                 trainloader.dataset.transform = transform_
-                
+
                 for epoch in range(args.epochs_new):
                     procD['epoch'] += 1
                     start_time = time.time()
-                    # train base sess
 
-                    #tl, ta = self.new_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
-                    #                        epoch)
-                    # test model with all seen class
-                    tsl, tsa = self.test(args, model, procD, clsD, testloader)
-
-                    # save better model
-                    
-                    if (tsa * 100) >= procD['trlog']['max_acc'][session]:
-                        procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
-                        procD['trlog']['max_acc_epoch'] = epoch
-                        save_model_dir = os.path.join(args.save_path, 'session' + str(session) + '_max_acc.pth')
-                        torch.save(dict(params=model.state_dict()), save_model_dir)
-                        torch.save(optimizer.state_dict(), os.path.join(args.save_path, 'optimizer_best.pth'))
-                        best_model_dict = deepcopy(model.state_dict())
-                        print('********A better model is found!!**********')
-                        print('Saving model to :%s' % save_model_dir)
-                     
-                    print('epoch {}, test acc={:.3f}'.format(epoch, tsa))
-                    lrc = scheduler.get_last_lr()[0]
-                    if epoch % 10 == 0:
-                        result_list.append(
-                            'epoch:%03d,lr:%.4f,training_loss:%.5f,training_acc:%.5f,test_loss:%.5f,test_acc:%.5f' % (
-                                epoch, lrc, tl, ta, tsl, tsa))
-                    scheduler.step()
-                """
-                # model.module.set_mode(args.new_mode)
-                model.eval()
+                    if not args.use_flyp_ft_inc:
+                        tl, ta = self.new_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                                                 epoch, loss_fn, supcon_criterion)
+                    else:
+                        tl = self.new_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                                             epoch, loss_fn, supcon_criterion)
 
                 print('Incremental session, test')
+                model.eval()
                 tsl, tsa = self.test(args, model, procD, clsD, testloader)
                 ntsl, ntsa = self.test(args, model, procD, clsD, new_testloader)
                 ptsl, ptsa = self.test(args, model, procD, clsD, prev_testloader)
