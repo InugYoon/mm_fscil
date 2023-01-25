@@ -88,8 +88,6 @@ def get_command_line_parser():
 
     #parser.add_argument('-fw_mode', default='fc_cosface', choices=['ang_arcface', 'ang_cosface', 'ang_ce',
      #parser.add_argument('-base_doubleaug', default=True)#parser.add_argument("-base_freeze_backbone", default=False)
-    parser.add_argument("--base_freeze_backbone", action='store_true')
-    parser.add_argument("--inc_freeze_backbone", action='store_true')
     parser.add_argument('--base_doubleaug', action='store_true') # for supcon
     parser.add_argument('--inc_doubleaug', action='store_true')
     parser.add_argument('--angle_exp', action='store_true')
@@ -131,10 +129,6 @@ def get_command_line_parser():
     parser.add_argument('--save_freq', type=int, default=100)
     parser.add_argument('--base_clf_ft', action='store_true')
 
-    parser.add_argument('--use_encmlp', action='store_true')
-    parser.add_argument('--encmlp_dim', type=int, default=256)
-    parser.add_argument('--encmlp_layers', type=int, default=2)
-
     parser.add_argument('--use_head', action='store_true')
     parser.add_argument('--head_type', type=str, default='mlp', choices=['mlp', 'lin', 'none'])
     parser.add_argument('--head_dim', type=int, default=256)
@@ -163,6 +157,15 @@ def get_command_line_parser():
     parser.add_argument('--use_flyp_ft_v2', action='store_true')
 
     parser.add_argument('--use_flyp_ft_inc', action='store_true', help='defaultto v1 for faster')
+
+    parser.add_argument("--base_freeze_backbone", action='store_true')
+    parser.add_argument("--inc_freeze_backbone", action='store_true')
+
+    parser.add_argument('--use_encmlp', action='store_true')
+    #parser.add_argument('--encmlp_dim', type=int, default=256)
+    # Textual classifier is in dimension with num_features for CLIP pre-train model
+    parser.add_argument('--encmlp_layers', type=int, default=2)
+    parser.add_argument('--lr_encmlp', type=float, default=0.01)
 
 
     return parser

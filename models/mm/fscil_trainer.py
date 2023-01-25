@@ -184,7 +184,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         if args.use_head:
             str_loss += 'hd%sD_%d-' % (args.head_type, args.head_dim)
         if args.use_encmlp:
-            str_loss += 'EM%d_D%d-' % (args.encmlp_layers, args.encmlp_dim)
+            #str_loss += 'EM%d_D%d-' % (args.encmlp_layers, args.encmlp_dim)
+            str_loss += 'EM%d-' % (args.encmlp_layers)
 
         hyper_name_list = 'Model_%s-Epob_%d-Epon_%d-Lrb_%.4f-Lrn_%.4f-%s-%s-Gam_%.2f-Dec_%.5f-wd_%.1f-ls_%.1f-Bs_%d-Mom_%.2f' \
                           'bsc_%d-way_%d-shot_%d-bfzb_%s-ifzb_%s-bdg_%s-idg_%s-rcnm_%s-bdm_%s-co_%s-rdtxt_%s' \
@@ -302,7 +303,9 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
     def get_optimizer_base(self, args, model, num_batches):
 
         if args.base_freeze_backbone:
-            for param in model.encoder.module.parameters():
+            assert not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2
+
+            for param in model.module.clip_encoder.parameters():
                 param.requires_grad = False
         # for param in self.model.module.fc.parameters():
         #    param.requires_grad = False
@@ -327,7 +330,19 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_base)
         """
         params = [p for p in model.module.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(params, lr=args.lr_base, weight_decay=args.wd)
+        if args.base_freeze_backbone:
+            assert args.use_encmlp
+            optimizer = torch.optim.AdamW(params, lr=args.lr_encmlp, weight_decay=args.wd)
+        else:
+            if not args.use_encmlp:
+                optimizer = torch.optim.AdamW(params, lr=args.lr_base, weight_decay=args.wd)
+            else:
+                assert not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2
+                optimizer = torch.optim.AdamW([{'params': model.module.clip_encoder.parameters(),
+                                                'lr': args.lr_base},
+                                         {'params': model.module.encmlp.parameters(), 'lr': args.lr_encmlp}],
+                                         weight_decay=args.wd)
+
         scheduler = cosine_lr(optimizer, args.lr_base, args.warmup_length, args.epochs_base * num_batches)
 
         return model, optimizer, scheduler
@@ -338,7 +353,9 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         # assert self.args.angle_mode is not None
 
         if args.inc_freeze_backbone:
-            for param in model.encoder.parameters():
+            assert not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2
+
+            for param in model.module.clip_encoder.parameters():
                 # param.requires_grad = False
                 param.requires_grad = False
 
@@ -347,8 +364,20 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 param.requires_grad = False
 
         params = [p for p in model.module.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(params, lr=args.lr_base, weight_decay=args.wd)
-        scheduler = cosine_lr(optimizer, args.lr_base, args.warmup_length, args.epochs_base * num_batches)
+        if args.inc_freeze_backbone:
+            assert args.use_encmlp
+            optimizer = torch.optim.AdamW(params, lr=args.lr_encmlp, weight_decay=args.wd)
+        else:
+            if not args.use_encmlp:
+                optimizer = torch.optim.AdamW(params, lr=args.lr_new, weight_decay=args.wd)
+            else:
+                assert not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2
+                optimizer = torch.optim.AdamW([{'params': model.module.clip_encoder.parameters(),
+                                                'lr': args.lr_new},
+                                         {'params': model.module.encmlp.parameters(), 'lr': args.lr_encmlp}],
+                                         weight_decay=args.wd)
+
+        scheduler = cosine_lr(optimizer, args.lr_new, args.warmup_length, args.epochs_new * num_batches)
 
         return model, optimizer, scheduler
 

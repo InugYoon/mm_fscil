@@ -43,10 +43,11 @@ class MYNET(nn.Module):
             self.head_dim = args.head_dim
             self.head_type = args.head_type
         if args.use_encmlp:
-            self.encmlp_dim = args.encmlp_dim
+            #self.encmlp_dim = args.encmlp_dim
             self.encmlp_layers = args.encmlp_layers
         self.use_randomtext = args.use_randomtext
-
+        self.base_freeze_backbone = args.base_freeze_backbone
+        self.inc_freeze_backbone = args.inc_freeze_backbone
 
         if not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2:
             self.clip_encoder = CLIP_Model(args, keep_lang=False)
@@ -105,7 +106,8 @@ class MYNET(nn.Module):
                 raise NotImplementedError(
                     'head not supported: {}'.format(self.head_type))
         if args.use_encmlp:
-            self.encmlp = projection_MLP(self.num_features, self.encmlp_dim, self.encmlp_layers)
+            #self.encmlp = projection_MLP(self.num_features, self.encmlp_dim, self.encmlp_layers)
+            self.encmlp = projection_MLP(self.num_features, self.num_features, self.encmlp_layers, eyes=True)
 
 
         #self.fc.weight.data = abs(self.fc.weight.data)
@@ -165,6 +167,8 @@ class MYNET(nn.Module):
         # which only use encode instead of calc to logits via classifiers for
         # training
         features = self.clip_encoder(inputs)
+        if self.use_encmlp:
+            features = self.encmlp(features)
         outputs = self.textual_classifier(features)
         n_cls = self.base_class if sess == 0 else self.base_class + self.way * (sess)
         if train==False:
@@ -395,7 +399,7 @@ class ClassificationHead(torch.nn.Linear):
 
 
 class projection_MLP(nn.Module):
-    def __init__(self, in_dim, out_dim, num_layers=2):
+    def __init__(self, in_dim, out_dim, num_layers=2, eyes=False):
         super().__init__()
         hidden_dim = out_dim
 
@@ -415,9 +419,15 @@ class projection_MLP(nn.Module):
             nn.Linear(hidden_dim, out_dim),
             nn.BatchNorm1d(out_dim, affine=False)  # Page:5, Paragraph:2
         )
+        if eyes:
+            nn.init.eye_(self.layer1[0].weight)
+            nn.init.eye_(self.layer2[0].weight)
+            nn.init.eye_(self.layer3[0].weight)
 
     def forward(self, x):
-        if self.num_layers == 2:
+        if self.num_layers == 1:
+            x = self.layer3(x)
+        elif self.num_layers == 2:
             x = self.layer1(x)
             x = self.layer3(x)
         elif self.num_layers == 3:
