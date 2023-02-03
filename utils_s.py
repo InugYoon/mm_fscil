@@ -244,50 +244,52 @@ book['seen_unsort_map'] = torch.tensor(seen_unsort_map).cuda()
 """
 
 
-def learn_gauss(args, trainloader, model, clsD, procD):
+def learn_gauss(args, trainloader, model, clsD, procD, gaussD):
     # only model on gpu
     # Else given by cpu (torch)
     sess = procD['session']
     beta =  args.tukey_beta
-    base_class = args.base_class
-    num_features = model.num_features
-    base_mean = torch.zeros(base_class, num_features)
-    base_cov = torch.zeros(base_class, num_features, num_features)
+    num_features = model.module.num_features
+    #base_mean = torch.zeros(base_class, num_features)
+    #base_cov = torch.zeros(base_class, num_features, num_features)
+    # gaussD[i] = mean, cov where mean.shape: (num_features), cov.shape: (num_features, num_features)
     embedding_list = []
     label_list = []
-    seen_unsort_map_ = clsD['seen_unsort_map'].cpu()
     with torch.no_grad():
         for i, batch in enumerate(trainloader):
             if args.base_doubleaug is False:
                 data, train_label = [_.cuda() for _ in batch]
-                target_cls = clsD['class_maps'][sess][train_label]
+                #target_cls = clsD['class_maps'][sess][train_label]
+                target_cls = clsD['seen_unsort_map'][train_label]
             else:
                 data = torch.cat((batch[0][0],batch[0][1]),dim=0).cuda()
                 train_label = batch[1].cuda()
                 train_label = train_label.repeat(2)
-                target_cls = clsD['class_maps'][sess][train_label]
+                #target_cls = clsD['class_maps'][sess][train_label]
+                target_cls = clsD['seen_unsort_map'][train_label]
 
             label = target_cls
             #model.module.mode = 'encoder'
-            model.set_mode('encoder')
-            embedding = model(data)
+            embedding = model.module.encode(data)
             embedding = torch.pow(embedding,beta)
             embedding_list.append(embedding.cpu())
             label_list.append(label.cpu())
     embedding_list = torch.cat(embedding_list, dim=0)
     label_list = torch.cat(label_list, dim=0)
 
-    for i in range(base_class):
+    classnames = np.unique(label_list)
+    for i in classnames:
         #ind_cl = torch.where(i == seen_unsort_map_[label_list])[0]
         ind_cl = torch.where(i == label_list)[0]
-        base_mean[i] = embedding_list[ind_cl].mean(dim=0)
-        mat = embedding_list[ind_cl] - embedding_list[ind_cl].mean(dim=0)  # 500,512
+        gaussD['mean'][i] = embedding_list[ind_cl].mean(dim=0)
+        #mat = embedding_list[ind_cl] - embedding_list[ind_cl].mean(dim=0)  # 500,512
+        mat = embedding_list[ind_cl] - gaussD['mean'][i]  # 500,512
         mat = mat.unsqueeze(dim=2)  # 500,512,1
         mat2 = mat.permute(0, 2, 1)  # 500,1,512
         cov_ = torch.bmm(mat, mat2)  # 500,512,512
         cov_ = torch.sum(cov_,dim=0)/(len(cov_)-1)
-        base_cov[i] = cov_
-    return base_mean, base_cov
+        gaussD['cov'][i] = cov_
+    return gaussD
 
 def distribution_calibration(query, base_means, base_cov, k, alpha=0.21):
     # torch cpu
@@ -362,6 +364,36 @@ def tot_datalist(args, dataloader, model, doubleaug, map=None, gpu=False, module
         #label_cls = np.array(label_cls)
         return data_, label_cls
 
+def tot_datalist_train(args, dataloader, model, doubleaug, map=None):
+    # model, map is assumed to be in gpu
+
+    data_ = []
+    label_ = []
+    model.train()
+    model.module.set_mode('encoder')
+    #set_seed(0)
+    for batch in dataloader:
+        if doubleaug is False:
+            data, label = [_.cuda() for _ in batch]
+        else:
+            data = batch[0][0].cuda()
+            label = batch[1].cuda()
+        #data = model(data).detach()
+        #data = model.module.clip_encoder(data)
+        data = model.module.encode(data)
+        data_.append(data)
+        label_.append(label)
+    data_ = torch.cat(data_, dim=0)
+    label_ = torch.cat(label_, dim=0)
+    if map is not None:
+        label_cls = (map)[label_]
+    else:
+        label_cls = label_
+    #data_ = np.array(data_)
+    #label_cls = np.array(label_cls)
+    return data_, label_cls
+
+
 def selec_datalist(args, datas, labels, idx, n_per_cls):
     labellist = set(np.unique(labels.cpu()).tolist())
     idxlist = set(np.unique(idx.cpu()).tolist())
@@ -428,11 +460,13 @@ def set_trainable_param(paramlist_, ts=[]):
     return paramlist_
 
 
-def save_obj(save_path, procD, clsD, bookD):
+def save_obj(save_path, procD, clsD, bookD, gaussD=None):
     dict = {}
     dict['procD']=procD
     dict['clsD'] = clsD
     dict['bookD'] = bookD
+    if gaussD is not None:
+        dict['gaussD'] = gaussD
     fn = os.path.join(save_path, 'saved_dicts')
     with open(fn,'wb') as f:
         pickle.dump(dict,f,pickle.HIGHEST_PROTOCOL)
@@ -765,3 +799,4 @@ def warmup_learning_rate(args, epoch, batch_id, total_batches, optimizer):
 
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+

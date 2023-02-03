@@ -120,6 +120,9 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             schedule = 'Step_%d' % (args.step)
         elif args.schedule == 'Cosine':
             schedule = 'schecos'
+        elif args.schedule == 'Custom_Cosine':
+            schedule = 'custcos'
+
         if args.schedule_new == 'Milestone':
             mile_stone_new = str(args.milestones_new).replace(" ", "").replace(',', '_')[1:-1]
             schedule_new = 'MS_%s' % (mile_stone_new)
@@ -128,6 +131,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             # schedule = 'Step_%d'%(args.step)
         elif args.schedule_new == 'Cosine':
             schedule_new = 'sch_c'
+        elif args.schedule_new == 'Custom_Cosine':
+            schedule_new = 'custcos'
 
         if args.batch_size_base > 256:
             args.warm = True
@@ -161,6 +166,10 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         # EM: encmlp
         # G: gauss, bt: tukey_beta, ns: num_sampled
         # CO: custom optimizer
+        # MM: mapmlp
+        # GG: GaussGenerate, b after GG is tukey_beta
+        # MMB: use_mapmlp_in_base
+        # ResMM: use_residual_mapmlp
 
         str_loss = '-'
         if args.use_celoss:
@@ -186,8 +195,21 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         if args.use_encmlp:
             #str_loss += 'EM%d_D%d-' % (args.encmlp_layers, args.encmlp_dim)
             str_loss += 'EM%d-' % (args.encmlp_layers)
+        if args.use_mapmlp:
+            str_loss += 'MM%d-'%(args.mapmlp_layers)
+        if args.use_gaussgen:
+            str_loss += 'GG%d_%.1f-'%(args.num_gaussgen, args.tukey_beta)
+        if args.use_mapmlp_in_base:
+            str_loss += 'MMB-'
+        if args.use_residual_mapmlp:
+            str_loss += 'ResMM%.2f-'%(args.alpha_residual_mapmlp)
 
-        hyper_name_list = 'Model_%s-Epob_%d-Epon_%d-Lrb_%.4f-Lrn_%.4f-%s-%s-Gam_%.2f-Dec_%.5f-wd_%.1f-ls_%.1f-Bs_%d-Mom_%.2f' \
+        cov_eyes = 'T' if args.use_cov_eyes else 'F'
+        if args.use_cov_eyes:
+            str_loss += 'covE_%s-'%(cov_eyes)
+
+
+        hyper_name_list = 'Model_%s-Epob_%d-Epon_%d-Lrb_%.5f-Lrn_%.5f-%s-%s-Gam_%.2f-Dec_%.5f-wd_%.1f-ls_%.1f-Bs_%d-Mom_%.2f' \
                           'bsc_%d-way_%d-shot_%d-bfzb_%s-ifzb_%s-bdg_%s-idg_%s-rcnm_%s-bdm_%s-co_%s-rdtxt_%s' \
                           '-ft_type_%s-sd_%d' % (
                               args.model_type, args.epochs_base, args.epochs_new, args.lr_base, args.lr_new, schedule, schedule_new, \
@@ -225,6 +247,10 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
         # Setting dictionaries
         # clsD initialize
         clsD = {}
+        if args.use_gaussgen:
+            gaussD = {}
+            gaussD['mean'] = {}
+            gaussD['cov'] = {}
 
         # clsD, procD
         if args.secondphase == False:
@@ -267,6 +293,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 dict_ = pickle.load(f)
                 procD = dict_['procD']
                 bookD = dict_['bookD']
+                if args.use_gaussgen:
+                    gaussD = dict_['gaussD']
 
             procD['session'] = args.start_session - 1
             # epoch, step is init to -1 for every sessions so no worry.
@@ -297,8 +325,10 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 pass
             else:
                 clsD = inc_maps(args, clsD, procD, args.start_session - 1)
-
-        return args, procD, clsD, bookD
+        if not args.use_gaussgen:
+            return args, procD, clsD, bookD
+        else:
+            return args, procD, clsD, bookD, gaussD
 
     def get_optimizer_base(self, args, model, num_batches):
 
@@ -343,7 +373,17 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                                          {'params': model.module.encmlp.parameters(), 'lr': args.lr_encmlp}],
                                          weight_decay=args.wd)
 
-        scheduler = cosine_lr(optimizer, args.lr_base, args.warmup_length, args.epochs_base * num_batches)
+        if args.schedule == 'Custom_Cosine':
+            scheduler = cosine_lr(optimizer, args.lr_base, args.warmup_length, args.epochs_base * num_batches)
+        elif args.schedule == 'Step':
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step, gamma=args.gamma)
+        elif args.schedule == 'Milestone':
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones,
+                                                             gamma=args.gamma)
+        elif args.schedule == 'Cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_base)
+        else:
+            raise NotImplementedError
 
         return model, optimizer, scheduler
 
@@ -365,8 +405,13 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
         params = [p for p in model.module.parameters() if p.requires_grad]
         if args.inc_freeze_backbone:
-            assert args.use_encmlp
-            optimizer = torch.optim.AdamW(params, lr=args.lr_encmlp, weight_decay=args.wd)
+            if args.use_encmlp:
+            #assert args.use_encmlp
+                optimizer = torch.optim.AdamW(params, lr=args.lr_encmlp, weight_decay=args.wd)
+            elif args.use_mapmlp:
+                optimizer = torch.optim.AdamW(params, lr=args.lr_new, weight_decay=args.wd)
+            else:
+                raise NotImplementedError
         else:
             if not args.use_encmlp:
                 optimizer = torch.optim.AdamW(params, lr=args.lr_new, weight_decay=args.wd)
@@ -377,9 +422,19 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                                          {'params': model.module.encmlp.parameters(), 'lr': args.lr_encmlp}],
                                          weight_decay=args.wd)
 
-        scheduler = cosine_lr(optimizer, args.lr_new, args.warmup_length, args.epochs_new * num_batches)
+        if args.schedule_new == 'Custom_Cosine':
+            scheduler = cosine_lr(optimizer, args.lr_new, args.warmup_length, args.epochs_new * num_batches)
+        elif args.schedule_new == 'Step':
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step, gamma=args.gamma)
+        elif args.schedule_new == 'Milestone':
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones,
+                                                             gamma=args.gamma)
+        elif args.schedule_new == 'Cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_new)
 
         return model, optimizer, scheduler
+
+
 
     def base_train(self, args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler, epoch,
                    loss_fn, supcon_criterion=None):
@@ -419,7 +474,11 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             data_time = time.time() - start_time
             """
             if not args.use_flyp_ft_v1 and not args.use_flyp_ft_v2:
-                logits = model(inputs, sess=procD['session'], train=True)
+                if not args.use_mapmlp_in_base:
+                    logits = model(inputs, sess=procD['session'], train=True)
+                else:
+                    feats_ = model(inputs, sess=procD['session'], encode=True, mapmlp=True, res_mapmlp=args.use_residual_mapmlp)
+                    logits = model(feats_, sess=procD['session'], encode=False, mapmlp=False)
                 loss = loss_fn(logits, labels)
             else:
                 torch.autograd.set_detect_anomaly(True)
@@ -545,17 +604,121 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             if not args.use_flyp_ft_inc:
                 acc = count_acc(logits, labels)
                 tqdm_gen.set_description(
-                    'Session 0, epo {}, total loss={:.4f} acc={:.4f}'.format(epoch, total_loss.item(), acc))
+                    'Session {}, epo {}, total loss={:.4f} acc={:.4f}'.format(procD['session'], epoch, total_loss.item(), acc))
                 ta.add(acc)
             else:
                 tqdm_gen.set_description(
-                    'Session 0, epo {}, total loss={:.4f}'.format(epoch, total_loss.item()))
+                    'Session {}, epo {}, total loss={:.4f}'.format(procD['session'], epoch, total_loss.item()))
         tl = tl.item()
         if not args.use_flyp_ft_inc:
             ta = ta.item()
             return tl, ta
         else:
             return tl
+
+    def new_train_featgen(self, args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler, epoch,
+                   loss_fn, supcon_criterion=None, gaussD=None):
+        assert not args.use_encmlp
+        assert args.inc_freeze_backbone
+        assert args.use_mapmlp
+
+        tl = Averager()
+        ta = Averager()
+        # self.model = self.model.train()
+        model.train()
+        num_batches = len(trainloader)
+
+        #inputs, labels = tot_datalist_train(args, trainloader, model, args.inc_doubleaug, map=clsD['class_maps'][procD['session']])
+        inputs, labels = tot_datalist_train(args, trainloader, model, args.inc_doubleaug,
+                                            map=clsD['seen_unsort_map'])
+
+        inputs = inputs.detach().cuda()
+        labels == labels.detach().cuda()
+
+        gen_inputs = []
+        gen_labels = []
+
+        n_cls_prev = args.base_class + args.way * (procD['session']-1)
+        prev_feats = model.module.textual_classifier.weight[:n_cls_prev].detach()
+        # for matching num_gpu remainder 0
+        remain_ = ((args.way*args.shot + n_cls_prev*args.num_gaussgen) % args.batch_size_base) % args.num_gpu
+        feat_dim = prev_feats.shape[1]
+        for i in range(n_cls_prev):
+            if i<remain_:
+                gen_num = args.num_gaussgen-1
+            else:
+                gen_num = args.num_gaussgen
+            if not args.use_gaussgen:
+                tmp_gen_inputs = prev_feats[i].expand(gen_num, feat_dim) + torch.rand(gen_num, feat_dim)
+            else:
+                if args.use_cov_eyes:
+                    # mvn = torch.distributions.MultivariateNormal(gaussD['mean'][i], gaussD['cov'][i])
+                    n_feats = model.module.num_features
+                    mvn = torch.distributions.MultivariateNormal(gaussD['mean'][i], 0.01*torch.eye(n_feats, n_feats))
+                    sampled = mvn.sample((gen_num,))
+                else:
+                    sample = np.random.multivariate_normal(gaussD['mean'][i], gaussD['cov'][i], gen_num)
+                    sampled = torch.tensor(sample).float()
+                # random_sample = torch.randn().cuda()
+                tmp_gen_inputs = torch.pow(sampled, 1 / args.tukey_beta).cuda()
+            gen_inputs.append(tmp_gen_inputs)
+            gen_labels.append(i * torch.ones(gen_num))
+        gen_inputs = torch.cat(gen_inputs, dim=0).detach().cuda()
+        gen_labels = torch.cat(gen_labels, dim=0).detach().cuda()
+
+
+        inputs = torch.cat((inputs, gen_inputs),dim=0)
+        labels = torch.cat((labels, gen_labels),dim=0)
+        inputs = inputs[torch.randperm(len(inputs))]
+        randperm_ = torch.randperm(len(labels)).cuda()
+        #inputs = inputs[randperm_].cuda()
+        labels = labels[randperm_].type(torch.LongTensor).cuda()
+
+        bsz_ = args.batch_size_base
+        for i in range(0, len(inputs), bsz_):
+            batch_ = inputs[i:i+bsz_]
+            label_ = labels[i:i+bsz_]
+            #label_ = label_.type(torch.LongTensor).cuda()
+            #feats = model.module.forw_mapmlp(batch_)
+            model.eval() # Since BatchNorm1d does not allow single lasted elements,
+            # Using error occurs when splitting into multiple gpus.
+            # req_grad and updpate params aren't effected and only batchnorm layer-like things are affected,
+            # which I desire. so just do this and forward mapmlp and do model.train() right away
+            feats = model(batch_, encode=False, mapmlp=True, res_mapmlp=args.use_residual_mapmlp)
+            feats = F.normalize(feats, dim=1)
+            # Need to normalize since no batchnorm due to eval()
+            # (Batchnorm is differ to norm but just did)
+            model.train()
+            logits_ = model(feats, sess=procD['session'], encode=False)
+            loss = loss_fn(feats, label_)
+
+            total_loss = loss
+
+            tl.add(total_loss.item())
+
+            optimizer.zero_grad()
+            # loss.backward()
+            total_loss.backward()
+            optimizer.step()
+
+            """
+            if not args.use_flyp_ft_inc:
+                acc = count_acc(feats, labels)
+                print('Session %d, epo%d, total loss=%.4f acc=%.4f'%(procD['sesion'],epoch, total_loss.item(), acc))
+                ta.add(acc)
+            else:
+                print('Session %d, epo%d, total loss=%.4f' % (procD['sesion'],epoch, total_loss.item()))
+            """
+        tl = tl.item()
+        """
+        if not args.use_flyp_ft_inc:
+            ta = ta.item()
+            return tl, ta
+        else:
+            return tl
+        """
+        return tl
+
 
 
     def test(self, args, model, procD, clsD, testloader):
@@ -572,7 +735,11 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
             for i, batch in enumerate(tqdm_gen, 1):
                 data, test_label = [_.cuda() for _ in batch]
                 #logits = get_logits(data, model)
-                logits = model(data, procD['session'])
+                if not args.use_gaussgen:
+                    logits = model(data, procD['session'])
+                else:
+                    feats = model(data, procD['session'], encode=True, mapmlp=True, res_mapmlp=args.use_residual_mapmlp)
+                    logits = model(feats, procD['session'], encode=False, mapmlp=False)
 
                 if session == 0:
                     # logits_cls = logits[:, clsD['tasks'][0]]
@@ -604,12 +771,19 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
     def main(self, args):
         timer = Timer()
-        args, procD, clsD, bookD = self.init_vars(args)
+        if not args.use_gaussgen:
+            args, procD, clsD, bookD = self.init_vars(args)
+        else:
+            args, procD, clsD, bookD, gaussD = self.init_vars(args)
 
         if args.use_supconloss:
             assert args.use_head == True
         if args.rbfc_opt2:
             assert args.no_rbfc == False
+        if args.use_mapmlp_in_base:
+            assert args.use_mapmlp
+        if args.use_residual_mapmlp:
+            assert args.use_mapmlp
 
         # model = MYNET(args, mode=args.base_mode)
         # model = SupConResNet(name=opt.model)
@@ -843,7 +1017,14 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                             save_model_dir = os.path.join(args.ft_save_path, 'session' + str(session) \
                                                           + '_epo' + str(epoch) + '_acc.pth')
                             torch.save(dict(params=model.state_dict()), save_model_dir)
-                            save_obj(args.ft_save_path, procD, clsD, bookD)
+
+                            if args.use_gaussgen:
+                                gaussD = learn_gauss(args, trainloader, model, clsD, procD, gaussD)
+                            # gaussD is used from sess>0 so no matter here or at last of sess 0.
+                            if not args.use_gaussgen:
+                                save_obj(args.ft_save_path, procD, clsD, bookD)
+                            else:
+                                save_obj(args.ft_save_path, procD, clsD, bookD, gaussD)
                             print('save path is %s'%(args.ft_save_path))
 
                 if args.use_flyp_ft_v1 or args.use_flyp_ft_v2:
@@ -865,6 +1046,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa)
 
 
+
                 if args.epochs_base == 0:
                     epoch = -1
                     if args.angle_exp:
@@ -880,7 +1062,8 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                               init_angle_feat_fc_std, init_angle_featmean_fc )
                         print(te_init_inter_angles, te_init_intra_angle_mean, te_init_intra_angle_std, te_init_angle_feat_fc, \
                               te_init_angle_feat_fc_std, te_init_angle_featmean_fc)
-
+                    """
+                    # Duplicated so remove
                     tsl, tsa = self.test(args, model, procD, clsD, testloader)  ####
                     procD['trlog']['max_acc'][session] = float('%.3f' % (tsa * 100))
                     procD['trlog']['test_loss'].append(tsl)
@@ -890,7 +1073,20 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                             epoch, tsl, tsa))
                     writer.add_scalar('Session {0} - Acc/val_ncm'.format(session), tsa, epoch)
                     writer.add_scalar('Session {0} - Learning rate/train'.format(session), epoch)
+                    
+                    """
                     # scheduler.step()
+
+                    if args.use_gaussgen:
+                        gaussD = learn_gauss(args, trainloader, model, clsD, procD, gaussD)
+                    # gaussD is used from sess>0 so no matter here or at last of sess 0.
+                    if not args.use_gaussgen:
+                        save_obj(args.ft_save_path, procD, clsD, bookD)
+                    else:
+                        save_obj(args.ft_save_path, procD, clsD, bookD, gaussD)
+                    save_model_dir = os.path.join(args.ft_save_path, 'session' + str(session) \
+                                                  + '_epob0_model' + str(epoch) + '_acc.pth')
+                    torch.save(dict(params=model.state_dict()), save_model_dir)
 
                 if args.plot_tsne:
                     base_tsne_idx = torch.arange(args.base_class)[
@@ -927,6 +1123,7 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                     session, procD['trlog']['max_acc_epoch'], procD['trlog']['max_acc'][session], ))
 
 
+
             else:  # incremental learning sessions
                 print("training session: [%d]" % session)
                 num_batches = len(trainloader)
@@ -938,15 +1135,24 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
                 for epoch in range(args.epochs_new):
                     procD['epoch'] += 1
                     start_time = time.time()
-
-                    if not args.use_flyp_ft_inc:
-                        tl, ta = self.new_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                    if not args.use_gaussgen:
+                        if not args.use_flyp_ft_inc:
+                            tl, ta = self.new_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                                                     epoch, loss_fn, supcon_criterion)
+                        else:
+                            tl = self.new_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
                                                  epoch, loss_fn, supcon_criterion)
                     else:
-                        tl = self.new_train(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
-                                             epoch, loss_fn, supcon_criterion)
-
+                        tl = self.new_train_featgen(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                                                    epoch, loss_fn, supcon_criterion, gaussD=gaussD)
+                        #if not args.use_flyp_ft_inc:
+                        #    tl, ta = self.new_train_featgen(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                        #                             epoch, loss_fn, supcon_criterion)
+                        #else:
+                        #    tl = self.new_train_featgen(args, model, procD, clsD, trainloader, optimizer, kdloss, scheduler,
+                        #                         epoch, loss_fn, supcon_criterion)
                 print('Incremental session, test')
+
                 model.eval()
                 tsl, tsa = self.test(args, model, procD, clsD, testloader)
                 ntsl, ntsa = self.test(args, model, procD, clsD, new_testloader)
@@ -964,6 +1170,9 @@ class FSCILTrainer(object, metaclass=abc.ABCMeta):
 
                 result_list.append(
                     'Session {}, test Acc {:.3f}\n'.format(session, procD['trlog']['max_acc'][session]))
+
+                if args.use_gaussgen:
+                    gaussD = learn_gauss(args, trainloader, model, clsD, procD, gaussD)
 
                 if args.plot_tsne:
                     # if session !=  args.sessions -1:

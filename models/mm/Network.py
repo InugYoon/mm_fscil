@@ -45,6 +45,9 @@ class MYNET(nn.Module):
         if args.use_encmlp:
             #self.encmlp_dim = args.encmlp_dim
             self.encmlp_layers = args.encmlp_layers
+        self.use_mapmlp = args.use_mapmlp
+        if self.use_mapmlp:
+            self.mapmlp_layers = args.mapmlp_layers
         self.use_randomtext = args.use_randomtext
         self.base_freeze_backbone = args.base_freeze_backbone
         self.inc_freeze_backbone = args.inc_freeze_backbone
@@ -58,6 +61,9 @@ class MYNET(nn.Module):
             self.train_preprocess = self.clip_encoder.train_preprocess
             self.val_preprocess = self.clip_encoder.val_preprocess
         self.textual_clf_weights = textual_clf_weights
+        self.use_residual_mapmlp = args.use_residual_mapmlp
+        if self.use_residual_mapmlp:
+            self.alpha_residual_mapmlp = args.alpha_residual_mapmlp
 
         if args.model_type == 'ViT-L_14':
             self.num_features = 768
@@ -108,6 +114,11 @@ class MYNET(nn.Module):
         if args.use_encmlp:
             #self.encmlp = projection_MLP(self.num_features, self.encmlp_dim, self.encmlp_layers)
             self.encmlp = projection_MLP(self.num_features, self.num_features, self.encmlp_layers, eyes=True)
+        if args.use_mapmlp:
+            self.mapmlp = projection_MLP(self.num_features, self.num_features, self.mapmlp_layers, eyes=True)
+
+        #if args.inc_featgenprev_loss_v1:
+        #    self.fcl = projection_MLP(self.num_features, self.num_features, 1, eyes=True)
 
 
         #self.fc.weight.data = abs(self.fc.weight.data)
@@ -148,9 +159,17 @@ class MYNET(nn.Module):
 
     def encode(self, images, texts=None):
         if texts == None:
-            return self.clip_encoder(images)
+            #return self.clip_encoder(images)
+            x =  self.clip_encoder(images)
+            if self.use_encmlp:
+                x = self.encmlp(x)
+            return x
         else:
             return self.clip_encoder(images, texts)
+
+    def forw_mapmlp(self,x):
+        assert self.use_mapmlp
+        return self.mapmlp(x)
 
     def update_text_clf(self, weights):
         self.textual_classifier = ClassificationHead(normalize=True, weights=weights)
@@ -161,14 +180,22 @@ class MYNET(nn.Module):
         x = F.normalize(self.head(x), dim=1)
         return x
 
-    def forward(self, inputs, sess=None, train=False):
+    def forward(self, inputs, sess=None, train=False, encode=True, mapmlp=False, res_mapmlp=False):
         # maybe only for CE-based loss calc
         # Because for FLYP, we use loss based on CLIP_loss,
         # which only use encode instead of calc to logits via classifiers for
         # training
-        features = self.clip_encoder(inputs)
-        if self.use_encmlp:
-            features = self.encmlp(features)
+        if encode:
+            features = self.encode(inputs)
+        else:
+            features = inputs
+        if mapmlp:
+            if not res_mapmlp:
+                return self.forw_mapmlp(features)
+            else:
+                forw_mapmlp = self.forw_mapmlp(features)
+                res_sum = self.alpha_residual_mapmlp * features + (1-self.alpha_residual_mapmlp) * forw_mapmlp
+                return res_sum
         outputs = self.textual_classifier(features)
         n_cls = self.base_class if sess == 0 else self.base_class + self.way * (sess)
         if train==False:

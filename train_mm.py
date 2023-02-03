@@ -34,10 +34,10 @@ def get_command_line_parser():
     parser.add_argument("--warmup_length", type=int, default=500)
 
 
-    parser.add_argument('--schedule', type=str, default='Milestone', # original version
-                        choices=['Step', 'Milestone', 'Cosine'])
-    parser.add_argument('--schedule_new', type=str, default='Milestone', # original version
-                        choices=['Step', 'Milestone', 'Cosine'])
+    parser.add_argument('--schedule', type=str, default='Custom_Cosine', # original version
+                        choices=['Step', 'Milestone', 'Cosine', 'Custom_Cosine'])
+    parser.add_argument('--schedule_new', type=str, default= 'Custom_Cosine', # original version
+                        choices=['Step', 'Milestone', 'Cosine', 'Custom_Cosine'])
     #parser.add_argument('-milestones', nargs='+', type=int, default=[40, 70]) # mini
     parser.add_argument('--milestones', nargs='+', type=int, default=[50,100])  # mini
     parser.add_argument('--milestones_new', nargs='+', type=int, default=[50, 100])  # mini
@@ -167,6 +167,20 @@ def get_command_line_parser():
     parser.add_argument('--encmlp_layers', type=int, default=2)
     parser.add_argument('--lr_encmlp', type=float, default=0.01)
 
+    parser.add_argument('--use_mapmlp', action='store_true')
+    parser.add_argument('--mapmlp_layers', type=int, default=2)
+
+    parser.add_argument('--use_gaussgen', action='store_true')
+    parser.add_argument('--num_gaussgen', type=int, default=5)
+    parser.add_argument('--tukey_beta', type=float, default=1.0)
+
+    parser.add_argument('--use_mapmlp_in_base', action='store_true')
+    parser.add_argument('--use_residual_mapmlp', action='store_true')
+    parser.add_argument('--alpha_residual_mapmlp', type=float, default=0.8)
+    parser.add_argument('--use_cov_eyes', action='store_true')
+
+
+    #parser.add_argument('--use_', action='store_true')
 
     return parser
 
